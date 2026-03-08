@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Guarim — Système Voiture Autonome</title>
+<title>ESP32U — Système Voiture Autonome</title>
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@300;400;500;600;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
 <!-- WebcamJS — gestion caméra multi-plateforme -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/webcamjs/1.0.26/webcam.min.js"></script>
@@ -1146,7 +1146,7 @@
     </div>
     <div>
       <div class="logo-text">ESP32U — V4</div>
-      <div class="logo-sub">Vehicule - autonome by Guarim</div>
+      <div class="logo-sub">AUTONOMOUS VEHICLE SYSTEM</div>
     </div>
   </div>
 
@@ -1997,7 +1997,9 @@ function processFrame(ts) {
   if (frameIndex % 3 === 0) {
     if (state.detections.stop)      detectStopSign(ctx, imageData, W, H);
     if (state.detections.lights)    detectTrafficLight(ctx, imageData, W, H);
-    if (state.detections.obstacles) detectColorObstacle(ctx, imageData, W, H);
+    if (state.detections.obstacles || state.detections.vehicles || state.detections.cyclists)
+                                    detectColorObstacle(ctx, imageData, W, H);
+    if (state.detections.pedestrian) detectPedestrians(ctx, imageData, W, H);
   }
   frameIndex++;
 
@@ -2016,77 +2018,244 @@ function processFrame(ts) {
   visionLoop = requestAnimationFrame(processFrame);
 }
 
+// ============================================================
+// DÉTECTION LIGNES — Zone : 50% BAS de l'écran uniquement
+// ============================================================
+// Deux lignes recherchées simultanément :
+//   LIGNE GAUCHE  → séparation avec voie inverse (côté gauche)
+//   LIGNE DROITE  → trottoir ou bord droit de la chaussée
+//
+// Algorithme par rangée :
+//   1. Sur chaque ligne horizontale (50%-100% hauteur), chercher
+//      la ligne côté gauche (premier pixel coloré depuis la gauche)
+//      et la ligne côté droit (premier pixel coloré depuis la droite)
+//   2. Calculer le centre entre ces deux points → position idéale
+//   3. Comparer les 2 rangées inférieures vs les 2 supérieures
+//      → delta de centre = anticipation de virage
+//   4. Erreur = centre_bas - W/2 → commande moteur proportionnelle
+// ============================================================
+
+// État persistant entre frames pour l'anticipation
+const lineState = {
+  leftLine:  [],
+  rightLine: [],
+  centerLine: [],
+  steerHistory: [],
+  lastLeftX:  null,
+  lastRightX: null,
+};
+
+function pixelMatchesColor(r, g, b, target) {
+  return r >= target.r[0] && r <= target.r[1]
+      && g >= target.g[0] && g <= target.g[1]
+      && b >= target.b[0] && b <= target.b[1];
+}
+
 function detectLines(ctx, imageData, W, H) {
   const data = imageData.data;
   const colorMap = {
-    white: { r: [200,255], g: [200,255], b: [200,255], color: '#ffffff' },
-    black: { r: [0,60], g: [0,60], b: [0,60], color: '#888888' },
-    red: { r: [150,255], g: [0,80], b: [0,80], color: '#ff2d55' },
-    green: { r: [0,80], g: [120,255], b: [0,80], color: '#00ff88' },
-    yellow: { r: [180,255], g: [160,255], b: [0,80], color: '#ffcc00' },
-    blue: { r: [0,80], g: [80,180], b: [150,255], color: '#00d4ff' }
+    white:  { r:[200,255], g:[200,255], b:[200,255], color:'#ffffff' },
+    black:  { r:[0,60],    g:[0,60],    b:[0,60],    color:'#aaaaaa' },
+    red:    { r:[150,255], g:[0,80],    b:[0,80],    color:'#ff2d55' },
+    green:  { r:[0,80],    g:[120,255], b:[0,80],    color:'#00ff88' },
+    yellow: { r:[180,255], g:[160,255], b:[0,80],    color:'#ffcc00' },
+    blue:   { r:[0,80],    g:[80,180],  b:[150,255], color:'#00d4ff' }
   };
 
   const target = colorMap[state.selectedColor];
   if (!target) return;
 
-  // Sample rows in lower half
-  let linePoints = [];
-  const sampleRows = [0.5, 0.6, 0.7, 0.8, 0.9];
+  // ── ZONE D'ANALYSE : 50% bas uniquement ──────────────────
+  const yStart = Math.floor(H * 0.50);
+  // 6 rangées échantillonnées uniformément dans la moitié basse
+  const sampleFracs = [0.52, 0.60, 0.67, 0.75, 0.83, 0.92];
 
-  sampleRows.forEach(rowFrac => {
-    const y = Math.floor(rowFrac * H);
-    let sum = 0, count = 0;
-    for (let x = 0; x < W; x += 4) {
+  const leftPts  = [];
+  const rightPts = [];
+  const centerPts = [];
+
+  sampleFracs.forEach(frac => {
+    const y = Math.floor(frac * H);
+    let leftX  = -1;
+    let rightX = -1;
+
+    // Chercher ligne GAUCHE : balayer de gauche vers droite
+    // S'arrêter au premier pixel coloré dans le tiers gauche
+    const leftLimit = Math.floor(W * 0.55);
+    for (let x = 2; x < leftLimit; x += 2) {
       const idx = (y * W + x) * 4;
-      const r = data[idx], g = data[idx+1], b = data[idx+2];
-      if (r >= target.r[0] && r <= target.r[1] &&
-          g >= target.g[0] && g <= target.g[1] &&
-          b >= target.b[0] && b <= target.b[1]) {
-        sum += x; count++;
+      if (pixelMatchesColor(data[idx], data[idx+1], data[idx+2], target)) {
+        leftX = x;
+        break;
       }
     }
-    if (count > 5) {
-      linePoints.push({ x: sum / count, y });
+
+    // Chercher ligne DROITE : balayer de droite vers gauche
+    // S'arrêter au premier pixel coloré dans le tiers droit
+    const rightLimit = Math.floor(W * 0.45);
+    for (let x = W - 2; x > rightLimit; x -= 2) {
+      const idx = (y * W + x) * 4;
+      if (pixelMatchesColor(data[idx], data[idx+1], data[idx+2], target)) {
+        rightX = x;
+        break;
+      }
+    }
+
+    if (leftX  > 0) leftPts.push({ x: leftX,  y });
+    if (rightX > 0) rightPts.push({ x: rightX, y });
+
+    // Centre entre les deux lignes détectées
+    if (leftX > 0 && rightX > 0 && rightX > leftX + 20) {
+      centerPts.push({ x: Math.round((leftX + rightX) / 2), y });
+    } else if (leftX > 0) {
+      // Seulement ligne gauche → estimer centre (ligne + marge droite fixe)
+      centerPts.push({ x: Math.round(leftX + W * 0.25), y });
+    } else if (rightX > 0) {
+      // Seulement ligne droite → estimer centre
+      centerPts.push({ x: Math.round(rightX - W * 0.25), y });
     }
   });
 
-  if (linePoints.length > 1) {
+  const hasLeft  = leftPts.length  >= 2;
+  const hasRight = rightPts.length >= 2;
+  const hasCenter = centerPts.length >= 2;
+
+  if (!hasLeft && !hasRight) return;
+
+  // ── DESSIN LIGNE GAUCHE (cyan) ────────────────────────────
+  if (hasLeft) {
+    ctx.strokeStyle = '#00d4ff';
+    ctx.lineWidth = 3;
+    ctx.shadowColor = '#00d4ff';
+    ctx.shadowBlur = 8;
+    ctx.setLineDash([12, 6]);
+    ctx.beginPath();
+    ctx.moveTo(leftPts[0].x, leftPts[0].y);
+    leftPts.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.shadowBlur = 0;
+
+    // Points de contact
+    leftPts.forEach(p => {
+      ctx.fillStyle = '#00d4ff';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 5, 0, Math.PI*2);
+      ctx.fill();
+    });
+
+    // Label
+    ctx.fillStyle = '#00d4ffCC';
+    ctx.font = 'bold 10px Share Tech Mono';
+    ctx.fillText('◄ GAUCHE', leftPts[0].x + 8, leftPts[0].y - 8);
+  }
+
+  // ── DESSIN LIGNE DROITE (accent2 / vert) ─────────────────
+  if (hasRight) {
     ctx.strokeStyle = target.color;
     ctx.lineWidth = 3;
     ctx.shadowColor = target.color;
     ctx.shadowBlur = 8;
+    ctx.setLineDash([12, 6]);
     ctx.beginPath();
-    ctx.moveTo(linePoints[0].x, linePoints[0].y);
-    linePoints.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.moveTo(rightPts[0].x, rightPts[0].y);
+    rightPts.forEach(p => ctx.lineTo(p.x, p.y));
     ctx.stroke();
+    ctx.setLineDash([]);
     ctx.shadowBlur = 0;
 
-    linePoints.forEach(p => {
+    rightPts.forEach(p => {
       ctx.fillStyle = target.color;
       ctx.beginPath();
       ctx.arc(p.x, p.y, 5, 0, Math.PI*2);
       ctx.fill();
     });
 
-    // Auto steer if autonomous
-    if (state.auto) {
-      const lastPoint = linePoints[linePoints.length - 1];
-      const center = W / 2;
-      const error = lastPoint.x - center;
-      if (Math.abs(error) > W * 0.1) {
-        const cmd = error > 0 ? 'R' : 'L';
-        sendBLE(cmd);
-        updateMotorUI(cmd);
-      } else {
-        sendBLE('F');
-        updateMotorUI('F');
-      }
-    }
-
-    state.counts.lines++;
-    document.getElementById('cnt-lines').textContent = state.counts.lines;
+    ctx.fillStyle = target.color + 'CC';
+    ctx.font = 'bold 10px Share Tech Mono';
+    const rp = rightPts[0];
+    ctx.fillText('DROITE ►', rp.x - 70, rp.y - 8);
   }
+
+  // ── DESSIN LIGNE DE CENTRE (jaune, tirets) ────────────────
+  if (hasCenter) {
+    ctx.strokeStyle = '#ffcc00';
+    ctx.lineWidth = 2;
+    ctx.shadowColor = '#ffcc00';
+    ctx.shadowBlur = 6;
+    ctx.setLineDash([8, 8]);
+    ctx.beginPath();
+    ctx.moveTo(centerPts[0].x, centerPts[0].y);
+    centerPts.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.shadowBlur = 0;
+
+    // Point central (bas de l'image = position actuelle)
+    const botCenter = centerPts[centerPts.length - 1];
+    ctx.fillStyle = '#ffcc00';
+    ctx.beginPath();
+    ctx.arc(botCenter.x, botCenter.y, 8, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // ── LOGIQUE DE PILOTAGE AUTONOME ─────────────────────────
+  if (state.auto && centerPts.length >= 2) {
+    // Erreur position = écart centre détecté vs centre écran
+    const botPt  = centerPts[centerPts.length - 1]; // position actuelle (bas)
+    const topPt  = centerPts[0];                     // position future (haut)
+    const midW   = W / 2;
+
+    const errCurrent = botPt.x - midW;   // erreur instantanée
+    const errFuture  = topPt.x - midW;   // erreur anticipée (haut = plus loin)
+
+    // Anticipation : pondérer 60% position actuelle + 40% future
+    const errBlended = errCurrent * 0.6 + errFuture * 0.4;
+
+    // Historique lissage (5 dernières valeurs)
+    lineState.steerHistory.push(errBlended);
+    if (lineState.steerHistory.length > 5) lineState.steerHistory.shift();
+    const errSmooth = lineState.steerHistory.reduce((a,b) => a+b, 0)
+                    / lineState.steerHistory.length;
+
+    const DEAD_ZONE   = W * 0.07;  // 7% largeur = zone neutre
+    const HARD_TURN   = W * 0.20;  // 20% = virage marqué
+
+    let cmd;
+    if      (errSmooth >  HARD_TURN)  cmd = 'R';
+    else if (errSmooth < -HARD_TURN)  cmd = 'L';
+    else if (errSmooth >  DEAD_ZONE)  cmd = 'R';
+    else if (errSmooth < -DEAD_ZONE)  cmd = 'L';
+    else                              cmd = 'F';
+
+    sendBLE(cmd);
+    updateMotorUI(cmd);
+
+    // Afficher vecteur de correction sur le canvas
+    const arrowX = W / 2;
+    const arrowY = H * 0.52;
+    ctx.strokeStyle = '#ffcc00';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(arrowX, arrowY);
+    ctx.lineTo(arrowX + errSmooth * 0.3, arrowY - 20);
+    ctx.stroke();
+  }
+
+  // Mémoriser les positions des lignes pour detectColorObstacle
+  if (leftPts.length  > 0) lineState.lastLeftX  = leftPts[leftPts.length-1].x;
+  if (rightPts.length > 0) lineState.lastRightX = rightPts[rightPts.length-1].x;
+
+  state.counts.lines++;
+  document.getElementById('cnt-lines').textContent = state.counts.lines;
+
+  // Mise à jour badge lignes
+  const linesBadges = document.getElementById('linesBadges');
+  const parts = [];
+  if (hasLeft)   parts.push(`<span style="font-family:'Share Tech Mono',monospace;font-size:0.6rem;padding:2px 6px;border:1px solid #00d4ff;border-radius:3px;color:#00d4ff;">◄ G:${leftPts.length}</span>`);
+  if (hasRight)  parts.push(`<span style="font-family:'Share Tech Mono',monospace;font-size:0.6rem;padding:2px 6px;border:1px solid ${target.color};border-radius:3px;color:${target.color};">D:${rightPts.length} ►</span>`);
+  if (hasCenter) parts.push(`<span style="font-family:'Share Tech Mono',monospace;font-size:0.6rem;padding:2px 6px;border:1px solid #ffcc00;border-radius:3px;color:#ffcc00;">⊕ CTR</span>`);
+  if (parts.length) linesBadges.innerHTML = parts.join('');
 }
 
 // ============================================================
@@ -2123,37 +2292,42 @@ function isRedStop(r, g, b) {
 
 function detectStopSign(ctx, imageData, W, H) {
   const data = imageData.data;
-  const CELL = 20;          // taille cellule px
-  const cols = Math.floor(W / CELL);
-  const rows = Math.floor(H / CELL);
+  const CELL = 20;
+  // ── ZONE : moitié DROITE uniquement ──────────────────────
+  const xZoneStart = Math.floor(W * 0.50);
+  const colStart   = Math.floor(xZoneStart / CELL);
+  const cols       = Math.floor(W / CELL);
+  const rows       = Math.floor(H / CELL);
   const MIN_RED_RATIO = 0.38;
-  const MIN_CELLS = 4;       // surface min ~80×80 px
+  const MIN_CELLS = 4;
 
-  // Carte de densité rouge
   const redMap = new Uint8Array(cols * rows);
 
   for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
+    for (let col = colStart; col < cols; col++) {  // ← départ col droite
       let redCount = 0, total = 0;
       const x0 = col * CELL, y0 = row * CELL;
       for (let dy = 0; dy < CELL; dy += 2) {
         for (let dx = 0; dx < CELL; dx += 2) {
-          const idx = ((y0 + dy) * W + (x0 + dx)) * 4;
+          const px = x0 + dx, py = y0 + dy;
+          if (px >= W || py >= H) continue;
+          const idx = (py * W + px) * 4;
           if (isRedStop(data[idx], data[idx+1], data[idx+2])) redCount++;
           total++;
         }
       }
-      redMap[row * cols + col] = (redCount / total) >= MIN_RED_RATIO ? 1 : 0;
+      if (total > 0) redMap[row * cols + col] = (redCount / total) >= MIN_RED_RATIO ? 1 : 0;
     }
   }
 
-  // Détection de blobs (flood fill simplifié)
+  // Détection de blobs (BFS)
   const visited = new Uint8Array(cols * rows);
   const blobs = [];
 
   for (let i = 0; i < redMap.length; i++) {
+    const col = i % cols;
+    if (col < colStart) continue;  // ignorer moitié gauche
     if (!redMap[i] || visited[i]) continue;
-    // BFS
     const queue = [i];
     visited[i] = 1;
     let cells = [];
@@ -2162,7 +2336,7 @@ function detectStopSign(ctx, imageData, W, H) {
       cells.push(cur);
       const r = Math.floor(cur / cols), c = cur % cols;
       [[r-1,c],[r+1,c],[r,c-1],[r,c+1]].forEach(([nr,nc]) => {
-        if (nr<0||nr>=rows||nc<0||nc>=cols) return;
+        if (nr<0||nr>=rows||nc<0||nc>=cols||nc<colStart) return;
         const ni = nr*cols+nc;
         if (!visited[ni] && redMap[ni]) { visited[ni]=1; queue.push(ni); }
       });
@@ -2170,9 +2344,7 @@ function detectStopSign(ctx, imageData, W, H) {
     if (cells.length >= MIN_CELLS) blobs.push(cells);
   }
 
-  // Tracer les bounding boxes détectées
   let bestBlob = null, bestScore = 0;
-
   blobs.forEach(cells => {
     let minC=cols, maxC=0, minR=rows, maxR=0;
     cells.forEach(i => {
@@ -2180,56 +2352,42 @@ function detectStopSign(ctx, imageData, W, H) {
       minC=Math.min(minC,c); maxC=Math.max(maxC,c);
       minR=Math.min(minR,r); maxR=Math.max(maxR,r);
     });
-
-    const blobW = (maxC-minC+1)*CELL;
-    const blobH = (maxR-minR+1)*CELL;
-    const ratio = blobW / blobH;
-
-    // Filtre forme : quasi-carré (0.6 à 1.6) — panneau STOP = octogone
+    const blobW=(maxC-minC+1)*CELL, blobH=(maxR-minR+1)*CELL;
+    const ratio = blobW/blobH;
     if (ratio < 0.55 || ratio > 1.7) return;
-
-    // Score = taille * compacité
-    const score = cells.length * (ratio > 0.8 && ratio < 1.25 ? 1.3 : 1.0);
+    const score = cells.length * (ratio>0.8&&ratio<1.25?1.3:1.0);
     if (score > bestScore) {
       bestScore = score;
-      bestBlob = { x: minC*CELL, y: minR*CELL, w: blobW, h: blobH,
-                   conf: Math.min(0.98, 0.5 + cells.length * 0.04) };
+      bestBlob = { x:minC*CELL, y:minR*CELL, w:blobW, h:blobH,
+                   conf:Math.min(0.98, 0.5+cells.length*0.04) };
     }
   });
 
+  // Dessiner zone d'analyse (contour semi-transparent droit)
+  ctx.strokeStyle = 'rgba(255,45,85,0.12)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4,8]);
+  ctx.strokeRect(xZoneStart, 0, W - xZoneStart, H);
+  ctx.setLineDash([]);
+
   if (bestBlob && bestBlob.conf > 0.52) {
     const b = bestBlob;
-    // Dessiner bbox rouge STOP
     drawBBox(ctx, b.x, b.y, b.w, b.h, '#ff2d55', '🛑 STOP', b.conf);
-
-    // Dessiner octogone stylisé au centre
-    const cx = b.x + b.w/2, cy = b.y + b.h/2;
-    const radius = Math.min(b.w, b.h) * 0.4;
-    ctx.strokeStyle = '#ff2d55';
-    ctx.lineWidth = 3;
-    ctx.shadowColor = '#ff2d55';
-    ctx.shadowBlur = 10;
+    const cx=b.x+b.w/2, cy=b.y+b.h/2;
+    const radius=Math.min(b.w,b.h)*0.4;
+    ctx.strokeStyle='#ff2d55'; ctx.lineWidth=3;
+    ctx.shadowColor='#ff2d55'; ctx.shadowBlur=10;
     ctx.beginPath();
-    for (let i = 0; i < 8; i++) {
-      const angle = (i * Math.PI / 4) - Math.PI/8;
-      const px = cx + radius * Math.cos(angle);
-      const py = cy + radius * Math.sin(angle);
-      i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    for (let i=0;i<8;i++) {
+      const angle=(i*Math.PI/4)-Math.PI/8;
+      const px=cx+radius*Math.cos(angle), py=cy+radius*Math.sin(angle);
+      i===0?ctx.moveTo(px,py):ctx.lineTo(px,py);
     }
-    ctx.closePath();
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-
-    // Déclencher l'action STOP (avec cooldown)
-    const now = Date.now();
-    if (now - lastStopTime > STOP_COOLDOWN) {
-      lastStopTime = now;
-      onStopSignDetected(b.conf);
-    }
-
+    ctx.closePath(); ctx.stroke(); ctx.shadowBlur=0;
+    const now=Date.now();
+    if (now-lastStopTime>STOP_COOLDOWN) { lastStopTime=now; onStopSignDetected(b.conf); }
     updateSignPanel('stop', b.conf);
   } else {
-    // Aucun STOP détecté — nettoyer badge si nécessaire
     if (!state.stopCountdown) clearSignPanel('stop');
   }
 }
@@ -2281,116 +2439,82 @@ function classifyLightPixel(r, g, b) {
 
 function detectTrafficLight(ctx, imageData, W, H) {
   const data = imageData.data;
-  const STEP = 3;  // échantillonnage tous les 3px (performance)
+  const STEP = 3;
+  // ── ZONE : moitié DROITE, partie haute (feux en hauteur) ─
+  const xStart  = Math.floor(W * 0.50);
+  const scanH   = Math.floor(H * 0.65);
 
-  // Compter les pixels de chaque couleur dans la moitié supérieure
-  // (les feux sont généralement en haut de l'image)
-  const scanH = Math.floor(H * 0.65);
-
-  let counts = { red: 0, orange: 0, green: 0, total: 0 };
-  // Garder aussi la position des clusters
   let redPts=[], orangePts=[], greenPts=[];
 
   for (let y = 0; y < scanH; y += STEP) {
-    for (let x = 0; x < W; x += STEP) {
+    for (let x = xStart; x < W; x += STEP) {  // ← x part de 50%
       const idx = (y * W + x) * 4;
       const col = classifyLightPixel(data[idx], data[idx+1], data[idx+2]);
-      counts.total++;
-      if (col) {
-        counts[col]++;
-        if      (col === 'red')    redPts.push({x, y});
-        else if (col === 'orange') orangePts.push({x, y});
-        else if (col === 'green')  greenPts.push({x, y});
-      }
+      if      (col === 'red')    redPts.push({x, y});
+      else if (col === 'orange') orangePts.push({x, y});
+      else if (col === 'green')  greenPts.push({x, y});
     }
   }
 
-  // Seuil minimal de pixels colorés pour déclencher
   const MIN_PIXELS = 18;
-
   const hasRed    = redPts.length    >= MIN_PIXELS;
   const hasOrange = orangePts.length >= MIN_PIXELS;
   const hasGreen  = greenPts.length  >= MIN_PIXELS;
+
+  // Dessiner zone d'analyse feux (même zone que STOP)
+  // (déjà dessinée par detectStopSign, on n'en ajoute pas une autre)
 
   if (!hasRed && !hasOrange && !hasGreen) {
     clearSignPanel('light');
     return;
   }
 
-  // Trouver le cluster dominant et sa bounding box
   let dominantColor = null, dominantPts = [];
-  if (hasRed && redPts.length >= orangePts.length && redPts.length >= greenPts.length) {
-    dominantColor = 'red'; dominantPts = redPts;
-  } else if (hasOrange && orangePts.length >= greenPts.length) {
-    dominantColor = 'orange'; dominantPts = orangePts;
+  if (hasRed && redPts.length>=orangePts.length && redPts.length>=greenPts.length) {
+    dominantColor='red'; dominantPts=redPts;
+  } else if (hasOrange && orangePts.length>=greenPts.length) {
+    dominantColor='orange'; dominantPts=orangePts;
   } else if (hasGreen) {
-    dominantColor = 'green'; dominantPts = greenPts;
+    dominantColor='green'; dominantPts=greenPts;
   }
-
   if (!dominantColor) return;
 
-  // Bounding box du cluster dominant
   let minX=W, maxX=0, minY=H, maxY=0;
-  // Prendre un sous-ensemble pour perf
   const sample = dominantPts.slice(0, Math.min(dominantPts.length, 200));
   sample.forEach(p => {
     minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x);
     minY=Math.min(minY,p.y); maxY=Math.max(maxY,p.y);
   });
 
-  const bw = maxX - minX + 20;
-  const bh = maxY - minY + 20;
-  const bx = Math.max(0, minX - 10);
-  const by = Math.max(0, minY - 10);
-
-  // Filtre taille minimale (éviter faux positifs sur petites zones)
+  const bw=maxX-minX+20, bh=maxY-minY+20;
+  const bx=Math.max(xStart, minX-10), by=Math.max(0, minY-10);
   if (bw < 12 || bh < 12) return;
 
   const conf = Math.min(0.97, 0.45 + dominantPts.length * 0.008);
-
   const colorMap = {
-    red:    { hex: '#ff2d55', label: '🔴 FEU ROUGE',   action: 'ARRÊT OBLIGATOIRE',    badge: 'badge-red',         badgeEl: 'badge-red' },
-    orange: { hex: '#ff9500', label: '🟡 FEU ORANGE',  action: 'RALENTIR — PRÉPAREZ-VOUS', badge: 'badge-yellow',   badgeEl: 'badge-yield' },
-    green:  { hex: '#00ff88', label: '🟢 FEU VERT',    action: 'PASSAGE AUTORISÉ',     badge: 'badge-green-light', badgeEl: 'badge-green-light' }
+    red:    { hex:'#ff2d55', label:'🔴 FEU ROUGE',  action:'ARRÊT OBLIGATOIRE',       badgeEl:'badge-red' },
+    orange: { hex:'#ff9500', label:'🟡 FEU ORANGE', action:'RALENTIR — PRÉPAREZ-VOUS', badgeEl:'badge-yield' },
+    green:  { hex:'#00ff88', label:'🟢 FEU VERT',   action:'PASSAGE AUTORISÉ',         badgeEl:'badge-green-light' }
   };
-
   const cm = colorMap[dominantColor];
 
-  // Dessiner bbox + cercle de couleur
   drawBBox(ctx, bx, by, bw, bh, cm.hex, cm.label, conf);
-
-  // Cercle lumineux au centre de la zone
-  const cx = bx + bw/2, cy = by + bh/2;
-  const radius = Math.min(bw, bh) * 0.35;
-  ctx.beginPath();
-  ctx.arc(cx, cy, radius, 0, Math.PI*2);
-  ctx.strokeStyle = cm.hex;
-  ctx.lineWidth = 3;
-  ctx.shadowColor = cm.hex;
-  ctx.shadowBlur = 15;
+  const cx=bx+bw/2, cy=by+bh/2, radius=Math.min(bw,bh)*0.35;
+  ctx.beginPath(); ctx.arc(cx,cy,radius,0,Math.PI*2);
+  ctx.strokeStyle=cm.hex; ctx.lineWidth=3;
+  ctx.shadowColor=cm.hex; ctx.shadowBlur=15;
   ctx.stroke();
-  ctx.fillStyle = cm.hex + '30';
-  ctx.fill();
-  ctx.shadowBlur = 0;
+  ctx.fillStyle=cm.hex+'30'; ctx.fill(); ctx.shadowBlur=0;
 
-  // Notifier si état change
-  const now = Date.now();
-  if (dominantColor !== lastLightState || now - lastLightTime > LIGHT_COOLDOWN * 3) {
-    lastLightState = dominantColor;
-    lastLightTime  = now;
+  const now=Date.now();
+  if (dominantColor!==lastLightState || now-lastLightTime>LIGHT_COOLDOWN*3) {
+    lastLightState=dominantColor; lastLightTime=now;
     onTrafficLightDetected(dominantColor, conf, cm);
   }
-
   updateSignPanel('light', conf, cm);
-
-  // Mettre à jour badges feux
-  document.querySelectorAll('.det-badge[id^="badge-"]').forEach(b => {
-    b.classList.remove('active','warning','danger');
-  });
-  const badgeEl = document.getElementById(cm.badgeEl);
-  if (badgeEl) {
-    badgeEl.classList.add(dominantColor === 'red' ? 'danger' : dominantColor === 'orange' ? 'warning' : 'active');
-  }
+  document.querySelectorAll('.det-badge[id^="badge-"]').forEach(b=>b.classList.remove('active','warning','danger'));
+  const badgeEl=document.getElementById(cm.badgeEl);
+  if (badgeEl) badgeEl.classList.add(dominantColor==='red'?'danger':dominantColor==='orange'?'warning':'active');
 }
 
 function onTrafficLightDetected(color, conf, cm) {
@@ -2420,49 +2544,151 @@ function onTrafficLightDetected(color, conf, cm) {
 }
 
 // ============================================================
-// DÉTECTION OBSTACLE PAR COULEUR (zone centrale image)
-// ============================================================
-// Cherche une masse sombre ou très colorée dans le couloir central
-// qui bloquerait la trajectoire (sol exclu = moitié basse ignorée)
+// DÉTECTION OBSTACLE / VÉHICULE / CYCLISTE
+// Zone : ENTRE les deux lignes détectées (couloir de circulation)
+//        50% haut → 50% bas (partie visible de la route devant)
 // ============================================================
 function detectColorObstacle(ctx, imageData, W, H) {
   const data = imageData.data;
-  // Zone d'analyse : couloir central 30% de large, quart supérieur-central
-  const x0 = Math.floor(W * 0.35), x1 = Math.floor(W * 0.65);
-  const y0 = Math.floor(H * 0.25), y1 = Math.floor(H * 0.60);
   const STEP = 4;
+
+  // Récupérer les limites gauche/droite des lignes si disponibles
+  // lineState est mis à jour dans detectLines
+  const leftBound  = lineState.lastLeftX  || Math.floor(W * 0.20);
+  const rightBound = lineState.lastRightX || Math.floor(W * 0.80);
+
+  // Zone entre les lignes, 50% haut → seulement la moitié haute
+  // de la zone route (pour voir ce qui vient en face, pas le sol)
+  const x0 = leftBound  + Math.floor((rightBound - leftBound) * 0.05);
+  const x1 = rightBound - Math.floor((rightBound - leftBound) * 0.05);
+  const y0 = Math.floor(H * 0.25);
+  const y1 = Math.floor(H * 0.58);
+
+  if (x1 <= x0 + 20) return; // zone trop étroite
 
   let darkCount = 0, total = 0;
 
   for (let y = y0; y < y1; y += STEP) {
     for (let x = x0; x < x1; x += STEP) {
       const idx = (y * W + x) * 4;
-      const r=data[idx], g=data[idx+1], b=data[idx+2];
-      const brightness = (r + g + b) / 3;
-      if (brightness < 60) darkCount++;
+      const brightness = (data[idx] + data[idx+1] + data[idx+2]) / 3;
+      if (brightness < 65) darkCount++;
       total++;
     }
   }
 
   const ratio = darkCount / total;
 
-  if (ratio > 0.30) {
-    // Obstacle probable dans le couloir central
-    const conf = Math.min(0.95, 0.4 + ratio * 1.5);
-    drawBBox(ctx, x0, y0, x1-x0, y1-y0, '#ff6b35', '⬛ OBSTACLE', conf);
+  if (ratio > 0.28) {
+    const conf = Math.min(0.95, 0.38 + ratio * 1.6);
+    const label = ratio > 0.55 ? '🚗 VÉHICULE' : ratio > 0.40 ? '🚴 CYCLISTE' : '⬛ OBSTACLE';
+    const color = ratio > 0.55 ? '#00d4ff' : ratio > 0.40 ? '#ff6b35' : '#ff9500';
 
-    state.counts.obstacles++;
-    document.getElementById('cnt-obstacles').textContent = state.counts.obstacles;
-    updateDetBadge('db-obs', state.counts.obstacles, 'danger');
+    drawBBox(ctx, x0, y0, x1-x0, y1-y0, color, label, conf);
 
-    // Distance estimée depuis la taille de la zone sombre
-    const estDist = Math.max(10, Math.round(80 * (1 - ratio)));
+    if (label.includes('VÉHICULE')) {
+      state.counts.vehicles++;
+      document.getElementById('cnt-vehicles').textContent = state.counts.vehicles;
+      updateDetBadge('db-car', state.counts.vehicles, 'active');
+      log(`🚗 Véhicule dans le couloir (conf:${(conf*100).toFixed(0)}%)`, 'warning');
+    } else if (label.includes('CYCLISTE')) {
+      state.counts.cyclists++;
+      document.getElementById('cnt-cyclists').textContent = state.counts.cyclists;
+      updateDetBadge('db-cyc', state.counts.cyclists, 'warning');
+      log(`🚴 Cycliste détecté (conf:${(conf*100).toFixed(0)}%)`, 'warning');
+    } else {
+      state.counts.obstacles++;
+      document.getElementById('cnt-obstacles').textContent = state.counts.obstacles;
+      updateDetBadge('db-obs', state.counts.obstacles, 'danger');
+    }
+
+    const estDist = Math.max(10, Math.round(90 * (1 - ratio)));
     simulateDistance(estDist);
 
     if (state.auto && estDist < state.motor.safeDist) {
       motorCmd('S');
       sendBLE('S');
-      log(`⛔ Obstacle central détecté (~${estDist}cm) — Arrêt`, 'danger');
+      log(`⛔ Obstacle dans le couloir (~${estDist}cm) — Arrêt`, 'danger');
+    }
+  }
+}
+
+// ============================================================
+// DÉTECTION PIÉTONS — Totalité de l'écran
+// ============================================================
+// Cherche des silhouettes verticales (ratio hauteur/largeur > 1.8)
+// avec mouvement ou contraste fort sur fond clair
+// ============================================================
+const pedState = { lastTime: 0, cooldown: 2500 };
+
+function detectPedestrians(ctx, imageData, W, H) {
+  if (!state.detections.pedestrian) return;
+  const data = imageData.data;
+  const CELL = 16;
+  const cols = Math.floor(W / CELL);
+  const rows = Math.floor(H / CELL);
+
+  // Carte de contraste (zones à fort contraste vertical = silhouette)
+  const contrastMap = new Float32Array(cols * rows);
+
+  for (let row = 1; row < rows - 1; row++) {
+    for (let col = 0; col < cols; col++) {
+      const x = col * CELL + CELL/2;
+      const y = row * CELL + CELL/2;
+
+      // Gradient vertical
+      const idxTop = ((row-1)*CELL*W + x) * 4;
+      const idxBot = ((row+1)*CELL*W + x) * 4;
+
+      const bTop = (data[idxTop]   + data[idxTop+1]   + data[idxTop+2])   / 3;
+      const bBot = (data[idxBot]   + data[idxBot+1]   + data[idxBot+2])   / 3;
+      const bMid = (data[(row*CELL*W+x)*4] + data[(row*CELL*W+x)*4+1] + data[(row*CELL*W+x)*4+2]) / 3;
+
+      // Score contraste
+      contrastMap[row * cols + col] = Math.abs(bTop - bBot) + Math.abs(bMid - bTop);
+    }
+  }
+
+  // Chercher des colonnes à fort score vertical sur ≥3 cellules consécutives
+  const CONTRAST_THRESH = 35;
+  const MIN_HEIGHT_CELLS = 3;
+
+  for (let col = 0; col < cols; col++) {
+    let streak = 0, startRow = 0;
+    for (let row = 0; row < rows; row++) {
+      if (contrastMap[row * cols + col] > CONTRAST_THRESH) {
+        if (streak === 0) startRow = row;
+        streak++;
+        if (streak >= MIN_HEIGHT_CELLS) {
+          // Silhouette verticale trouvée
+          const bx = col * CELL - 10;
+          const by = startRow * CELL;
+          const bw = CELL + 20;
+          const bh = streak * CELL;
+          const ratio = bh / bw;
+
+          if (ratio > 1.6 && bw < W * 0.20) { // filtre: vertical et pas trop large
+            const conf = Math.min(0.90, 0.40 + streak * 0.08);
+            drawBBox(ctx, Math.max(0,bx), by, Math.min(bw, W-bx), bh, '#ffcc00', '🚶 PIÉTON', conf);
+
+            const now = Date.now();
+            if (now - pedState.lastTime > pedState.cooldown) {
+              pedState.lastTime = now;
+              state.counts.pedestrian++;
+              document.getElementById('cnt-pedestrian').textContent = state.counts.pedestrian;
+              updateDetBadge('db-ped', state.counts.pedestrian, 'warning');
+              log(`🚶 Piéton détecté (conf:${(conf*100).toFixed(0)}%) — Ralentissement`, 'warning');
+              if (state.auto) {
+                const slowSpeed = Math.floor(state.motor.speed * 0.4);
+                sendBLE(`V${slowSpeed}`);
+              }
+            }
+            break; // une détection par colonne
+          }
+        }
+      } else {
+        streak = 0;
+      }
     }
   }
 }
@@ -2540,22 +2766,74 @@ function drawBBox(ctx, x, y, w, h, color, label, conf) {
 }
 
 function drawGuide(ctx, W, H) {
-  // Center line
-  ctx.strokeStyle = 'rgba(0,212,255,0.2)';
+  // ── 1. Ligne de séparation 50% (limite basse détection lignes) ─
+  ctx.strokeStyle = 'rgba(0,212,255,0.18)';
   ctx.lineWidth = 1;
-  ctx.setLineDash([5, 10]);
+  ctx.setLineDash([6, 10]);
   ctx.beginPath();
-  ctx.moveTo(W/2, H*0.3);
-  ctx.lineTo(W/2, H);
+  ctx.moveTo(0, H * 0.50);
+  ctx.lineTo(W, H * 0.50);
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // Horizon line
-  ctx.strokeStyle = 'rgba(0,212,255,0.1)';
+  // Label zone lignes
+  ctx.fillStyle = 'rgba(0,212,255,0.45)';
+  ctx.font = '9px Share Tech Mono';
+  ctx.fillText('▼ ZONE DÉTECTION LIGNES', 4, H * 0.50 + 12);
+
+  // ── 2. Zone STOP + FEUX (moitié droite) ──────────────────
+  ctx.strokeStyle = 'rgba(255,45,85,0.10)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 8]);
+  ctx.strokeRect(Math.floor(W * 0.50), 0, Math.floor(W * 0.50), H * 0.65);
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(255,45,85,0.35)';
+  ctx.font = '9px Share Tech Mono';
+  ctx.fillText('STOP/FEUX ►', Math.floor(W * 0.51), 12);
+
+  // ── 3. Couloir de circulation entre les lignes ────────────
+  const leftBound  = lineState.lastLeftX  || Math.floor(W * 0.20);
+  const rightBound = lineState.lastRightX || Math.floor(W * 0.80);
+  const corridorY0 = Math.floor(H * 0.25);
+  const corridorY1 = Math.floor(H * 0.58);
+
+  ctx.strokeStyle = 'rgba(255,150,0,0.15)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 7]);
+  ctx.strokeRect(leftBound, corridorY0, rightBound - leftBound, corridorY1 - corridorY0);
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(255,150,0,0.35)';
+  ctx.font = '9px Share Tech Mono';
+  ctx.fillText('COULOIR', leftBound + 4, corridorY0 + 12);
+
+  // ── 4. Ligne centrale de référence (axe de route idéal) ──
+  ctx.strokeStyle = 'rgba(255,204,0,0.18)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([5, 10]);
   ctx.beginPath();
-  ctx.moveTo(0, H*0.45);
-  ctx.lineTo(W, H*0.45);
+  ctx.moveTo(W / 2, H * 0.50);
+  ctx.lineTo(W / 2, H);
   ctx.stroke();
+  ctx.setLineDash([]);
+
+  // ── 5. Horizon virtuel ────────────────────────────────────
+  ctx.strokeStyle = 'rgba(0,212,255,0.08)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, H * 0.45);
+  ctx.lineTo(W, H * 0.45);
+  ctx.stroke();
+
+  // ── 6. Indicateur position véhicule (triangle bas) ───────
+  const vehX = W / 2;
+  const vehY = H - 18;
+  ctx.fillStyle = 'rgba(0,212,255,0.5)';
+  ctx.beginPath();
+  ctx.moveTo(vehX, vehY - 10);
+  ctx.lineTo(vehX - 8, vehY);
+  ctx.lineTo(vehX + 8, vehY);
+  ctx.closePath();
+  ctx.fill();
 }
 
 function applyEdgeFilter(ctx, imageData, W, H) {
