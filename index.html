@@ -7,6 +7,10 @@
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@300;400;500;600;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
 <!-- WebcamJS — gestion caméra multi-plateforme -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/webcamjs/1.0.26/webcam.min.js"></script>
+<!-- TensorFlow.js — moteur d'inférence IA WebGL -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<!-- COCO-SSD — détection 80 classes (personnes, véhicules, vélos, etc.) -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
 <style>
   :root {
     --bg: #050810;
@@ -1126,6 +1130,40 @@
     text-align: center;
     letter-spacing: 0.1em;
   }
+
+  /* ── AI MODEL STATUS ── */
+  .ai-status-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 14px;
+    background: rgba(0,0,0,0.3);
+    border-bottom: 1px solid var(--border);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.58rem;
+    flex-wrap: wrap;
+  }
+  .ai-chip {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    transition: all 0.4s;
+    white-space: nowrap;
+  }
+  .ai-chip.loading { border-color: var(--accent4); color: var(--accent4); }
+  .ai-chip.ready   { border-color: var(--accent2); color: var(--accent2); background: rgba(0,255,136,0.06); }
+  .ai-chip.error   { border-color: var(--danger);  color: var(--danger); }
+  .ai-chip-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+  }
+  .ai-chip.ready .ai-chip-dot { animation: pulse 2s infinite; }
 </style>
 </head>
 <body>
@@ -1145,7 +1183,7 @@
       </svg>
     </div>
     <div>
-      <div class="logo-text">ESP32U — V4-Guarim</div>
+      <div class="logo-text">ESP32U — V4</div>
       <div class="logo-sub">AUTONOMOUS VEHICLE SYSTEM</div>
     </div>
   </div>
@@ -1353,6 +1391,26 @@
           <div class="mode-tab" onclick="setViewMode(this,'color')">COULEUR</div>
         </div>
         <span class="panel-badge" id="fpsBadge">0 FPS</span>
+      </div>
+    </div>
+
+    <!-- AI MODELS STATUS BAR -->
+    <div class="ai-status-bar">
+      <span style="color:var(--text-dim);letter-spacing:0.15em;font-size:0.55rem;">MOTEURS IA :</span>
+      <div class="ai-chip" id="chip-cocoSsd">
+        <div class="ai-chip-dot"></div>
+        COCO-SSD
+      </div>
+      <div class="ai-chip" id="chip-lineDetect">
+        <div class="ai-chip-dot"></div>
+        LIGNES-CV
+      </div>
+      <div class="ai-chip" id="chip-signDetect">
+        <div class="ai-chip-dot"></div>
+        STOP/FEUX-HSV
+      </div>
+      <div style="margin-left:auto;font-size:0.55rem;color:var(--text-dim);">
+        Backend: <span id="tfBackend" style="color:var(--accent);">—</span>
       </div>
     </div>
 
@@ -1954,101 +2012,277 @@ function updateCameraUI(active, sourceName) {
 }
 
 // ============================================================
-// COMPUTER VISION
-// ============================================================
-let visionLoop = null;
-let tempCanvas, tempCtx;
+// ╔══════════════════════════════════════════════════════════════╗
+// ║  MOTEUR DE VISION IA — ESP32U AutoCar V4                    ║
+// ║                                                              ║
+// ║  STACK TECHNIQUE :                                           ║
+// ║  ┌──────────────────────────────────────────────────────┐   ║
+// ║  │ TensorFlow.js (WebGL GPU)                            │   ║
+// ║  │  └─ COCO-SSD lite_mobilenet_v2                       │   ║
+// ║  │      • Piétons    → plein écran                      │   ║
+// ║  │      • Véhicules  → couloir entre lignes             │   ║
+// ║  │      • Cyclistes  → couloir entre lignes             │   ║
+// ║  ├──────────────────────────────────────────────────────┤   ║
+// ║  │ Analyse HSV Pixel (CPU, ultra-léger)                 │   ║
+// ║  │  • Panneaux STOP → ½ droite écran                    │   ║
+// ║  │  • Feux tricolores → ½ droite écran                  │   ║
+// ║  │  • Lignes de marquage → 50% bas écran                │   ║
+// ║  │    ├─ Ligne gauche (voie inverse)                     │   ║
+// ║  │    ├─ Ligne droite (trottoir)                         │   ║
+// ║  │    └─ Centre calculé + anticipation virage            │   ║
+// ║  └──────────────────────────────────────────────────────┘   ║
+// ╚══════════════════════════════════════════════════════════════╝
 
+// ── Variables globales vision ────────────────────────────────────
+let visionLoop   = null;
+let tempCanvas   = null;
+let tempCtx      = null;
+let cocoModel    = null;
+let aiReady      = false;
+let lastCocoTime = 0;
+const COCO_INTERVAL_MS = 100; // ~10 inférences GPU/s
+
+// ── Mapping classes COCO → catégories locales ────────────────────
+const COCO_MAP = {
+  person:     { label:'🚶 PIÉTON',   color:'#ffcc00', cat:'pedestrian', zone:'full'     },
+  bicycle:    { label:'🚴 CYCLISTE', color:'#ff6b35', cat:'cyclists',   zone:'corridor' },
+  motorcycle: { label:'🏍 MOTO',     color:'#ff9500', cat:'cyclists',   zone:'corridor' },
+  car:        { label:'🚗 VOITURE',  color:'#00d4ff', cat:'vehicles',   zone:'corridor' },
+  truck:      { label:'🚛 CAMION',   color:'#00aaff', cat:'vehicles',   zone:'corridor' },
+  bus:        { label:'🚌 BUS',      color:'#0088ff', cat:'vehicles',   zone:'corridor' },
+  'stop sign':{ label:'🛑 STOP',     color:'#ff2d55', cat:'stop',       zone:'right'    },
+  'traffic light':{ label:'🚦 FEU', color:'#ffcc00', cat:'lights',     zone:'right'    },
+};
+
+// ── État persistant lignes (partagé avec detectLines) ────────────
+const lineState = {
+  steerHistory: [],
+  lastLeftX:  null,
+  lastRightX: null,
+};
+
+// ── Cooldowns ────────────────────────────────────────────────────
+const STOP_COOLDOWN  = 4000;
+const LIGHT_COOLDOWN = 1500;
+let lastStopTime   = 0;
+let lastLightTime  = 0;
+let lastLightState = null;
+
+// ── Throttle logs par classe ──────────────────────────────────────
+const logThrottle = {};
+
+// ════════════════════════════════════════════════════════════════
+// CHARGEMENT DES MODÈLES IA
+// ════════════════════════════════════════════════════════════════
+async function loadAIModels() {
+  setChip('chip-cocoSsd',   'loading', 'COCO-SSD ⟳');
+  setChip('chip-lineDetect','loading', 'LIGNES-CV ⟳');
+  setChip('chip-signDetect','loading', 'STOP/FEUX ⟳');
+
+  log('🤖 TensorFlow.js — initialisation...', 'info');
+
+  try {
+    await tf.ready();
+    const backend = tf.getBackend();
+    const el = document.getElementById('tfBackend');
+    if (el) el.textContent = backend.toUpperCase();
+    log(`✅ TF.js — backend: ${backend.toUpperCase()}`, 'success');
+
+    log('📦 COCO-SSD lite_mobilenet_v2 — téléchargement...', 'info');
+    cocoModel = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+    aiReady = true;
+
+    setChip('chip-cocoSsd',   'ready', 'COCO-SSD ✓');
+    setChip('chip-lineDetect','ready', 'LIGNES-CV ✓');
+    setChip('chip-signDetect','ready', 'STOP/FEUX ✓');
+    log('✅ COCO-SSD chargé — piétons / véhicules / cyclistes actifs (GPU)', 'success');
+    log('✅ HSV pixel-analysis — STOP, feux, lignes actifs (CPU)', 'success');
+
+  } catch(err) {
+    setChip('chip-cocoSsd','error','COCO-SSD ✗');
+    setChip('chip-lineDetect','ready','LIGNES-CV ✓');
+    setChip('chip-signDetect','ready','STOP/FEUX ✓');
+    log(`⚠ COCO-SSD indisponible: ${err.message}`, 'warning');
+    log('⚠ Analyse pixel HSV uniquement (STOP, feux, lignes)', 'warning');
+  }
+}
+
+function setChip(id, chipState, label) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.className = `ai-chip ${chipState}`;
+  el.innerHTML = `<div class="ai-chip-dot"></div>${label}`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// DÉMARRAGE + BOUCLE PRINCIPALE
+// ════════════════════════════════════════════════════════════════
 function startVision() {
   tempCanvas = document.createElement('canvas');
-  tempCtx = tempCanvas.getContext('2d');
+  tempCtx    = tempCanvas.getContext('2d', { willReadFrequently: true });
   visionLoop = requestAnimationFrame(processFrame);
 }
 
-// Compteur de frames pour throttling des détections lourdes
 let frameIndex = 0;
 
-function processFrame(ts) {
+async function processFrame(ts) {
   if (!state.camera.active) return;
 
-  const video = document.getElementById('videoFeed');
+  const video  = document.getElementById('videoFeed');
   const canvas = document.getElementById('overlayCanvas');
-  const ctx = canvas.getContext('2d');
+  const ctx    = canvas.getContext('2d');
 
-  if (video.readyState < 2) {
+  if (!video || video.readyState < 2) {
     visionLoop = requestAnimationFrame(processFrame);
     return;
   }
 
   const W = canvas.width, H = canvas.height;
-  tempCanvas.width = W; tempCanvas.height = H;
+  tempCanvas.width = W;
+  tempCanvas.height = H;
   tempCtx.drawImage(video, 0, 0, W, H);
   const imageData = tempCtx.getImageData(0, 0, W, H);
 
   ctx.clearRect(0, 0, W, H);
 
-  if (state.viewMode === 'edge')  applyEdgeFilter(ctx, imageData, W, H);
+  // Filtres visuels
+  if      (state.viewMode === 'edge')  applyEdgeFilter(ctx, imageData, W, H);
   else if (state.viewMode === 'color') applyColorFilter(ctx, imageData, W, H);
 
-  // Détection lignes — chaque frame
+  // ── 1. COCO-SSD (GPU TF.js) — cadencé par temps ────────────
+  const nowMs = performance.now();
+  if (aiReady && cocoModel && (nowMs - lastCocoTime) >= COCO_INTERVAL_MS) {
+    lastCocoTime = nowMs;
+    try {
+      // confidence min 0.40, max 8 détections
+      const preds = await cocoModel.detect(video, 8, 0.40);
+      drawCocoPredictions(ctx, preds, W, H);
+    } catch(_) {}
+  }
+
+  // ── 2. Lignes de marquage (pixel HSV, chaque frame) ─────────
   if (state.detections.lines) detectLines(ctx, imageData, W, H);
 
-  // Détections lourdes — toutes les 3 frames (~7/s à 20fps)
-  if (frameIndex % 3 === 0) {
-    if (state.detections.stop)      detectStopSign(ctx, imageData, W, H);
-    if (state.detections.lights)    detectTrafficLight(ctx, imageData, W, H);
-    if (state.detections.obstacles || state.detections.vehicles || state.detections.cyclists)
-                                    detectColorObstacle(ctx, imageData, W, H);
-    if (state.detections.pedestrian) detectPedestrians(ctx, imageData, W, H);
+  // ── 3. STOP + Feux (pixel HSV, toutes les 4 frames) ─────────
+  if (frameIndex % 4 === 0) {
+    if (state.detections.stop)   detectStopSign(ctx, imageData, W, H);
+    if (state.detections.lights) detectTrafficLight(ctx, imageData, W, H);
   }
   frameIndex++;
 
+  // Guide HUD
   drawGuide(ctx, W, H);
 
+  // FPS
   state.frameCount++;
   const elapsed = ts - state.lastFrameTime;
   if (elapsed > 500) {
     state.fps = Math.round(state.frameCount * 1000 / elapsed);
     state.frameCount = 0;
     state.lastFrameTime = ts;
-    document.getElementById('fpsBadge').textContent = `${state.fps} FPS`;
-    document.getElementById('fpsDisplay').innerHTML = `${state.fps}<span class="stat-unit">fps</span>`;
+    const fb = document.getElementById('fpsBadge');
+    const fd = document.getElementById('fpsDisplay');
+    if (fb) fb.textContent = `${state.fps} FPS`;
+    if (fd) fd.innerHTML = `${state.fps}<span class="stat-unit">fps</span>`;
   }
 
   visionLoop = requestAnimationFrame(processFrame);
 }
 
-// ============================================================
-// DÉTECTION LIGNES — Zone : 50% BAS de l'écran uniquement
-// ============================================================
-// Deux lignes recherchées simultanément :
-//   LIGNE GAUCHE  → séparation avec voie inverse (côté gauche)
-//   LIGNE DROITE  → trottoir ou bord droit de la chaussée
-//
-// Algorithme par rangée :
-//   1. Sur chaque ligne horizontale (50%-100% hauteur), chercher
-//      la ligne côté gauche (premier pixel coloré depuis la gauche)
-//      et la ligne côté droit (premier pixel coloré depuis la droite)
-//   2. Calculer le centre entre ces deux points → position idéale
-//   3. Comparer les 2 rangées inférieures vs les 2 supérieures
-//      → delta de centre = anticipation de virage
-//   4. Erreur = centre_bas - W/2 → commande moteur proportionnelle
-// ============================================================
+// ════════════════════════════════════════════════════════════════
+// COCO-SSD — RENDU + FILTRAGE ZONES
+// ════════════════════════════════════════════════════════════════
+function drawCocoPredictions(ctx, predictions, W, H) {
+  // Bornes du couloir issues de la détection de lignes
+  const corrL = lineState.lastLeftX  ? lineState.lastLeftX  + 10 : Math.floor(W * 0.15);
+  const corrR = lineState.lastRightX ? lineState.lastRightX - 10 : Math.floor(W * 0.85);
+  const rightHalf = Math.floor(W * 0.50);
 
-// État persistant entre frames pour l'anticipation
-const lineState = {
-  leftLine:  [],
-  rightLine: [],
-  centerLine: [],
-  steerHistory: [],
-  lastLeftX:  null,
-  lastRightX: null,
-};
+  predictions.forEach(pred => {
+    const info = COCO_MAP[pred.class];
+    if (!info) return;
+    if (!state.detections[info.cat]) return;
 
-function pixelMatchesColor(r, g, b, target) {
-  return r >= target.r[0] && r <= target.r[1]
-      && g >= target.g[0] && g <= target.g[1]
-      && b >= target.b[0] && b <= target.b[1];
+    const [bx, by, bw, bh] = pred.bbox;
+    const cx = bx + bw / 2;
+    const cy = by + bh / 2;
+
+    // ── Filtrage géographique par zone ──────────────────────
+    if (info.zone === 'corridor') {
+      // Véhicules / cyclistes : uniquement dans le couloir de circulation
+      if (cx < corrL || cx > corrR) return;
+      if (cy > H * 0.80) return; // trop bas = hors champ utile
+    } else if (info.zone === 'right') {
+      // STOP / feux reconnus par COCO aussi → moitié droite
+      if (cx < rightHalf) return;
+    }
+    // zone 'full' (piétons) → pas de filtre
+
+    const conf = pred.score;
+    drawBBoxAI(ctx, bx, by, bw, bh, info.color, info.label, conf);
+
+    // ── Compteurs ────────────────────────────────────────────
+    state.counts[info.cat] = (state.counts[info.cat] || 0) + 1;
+    const cntIds = {
+      pedestrian: 'cnt-pedestrian',
+      cyclists:   'cnt-cyclists',
+      vehicles:   'cnt-vehicles',
+      stop:       'cnt-stop',
+      lights:     'cnt-lights',
+    };
+    const cntEl = document.getElementById(cntIds[info.cat]);
+    if (cntEl) cntEl.textContent = state.counts[info.cat];
+
+    const bdgMap = { pedestrian:'db-ped', cyclists:'db-cyc', vehicles:'db-car' };
+    const bdgCls = { pedestrian:'warning', cyclists:'warning', vehicles:'active' };
+    if (bdgMap[info.cat]) updateDetBadge(bdgMap[info.cat], state.counts[info.cat], bdgCls[info.cat]);
+
+    // ── Actions autonomes ────────────────────────────────────
+    if (state.auto) {
+      const dist = estimateDistFromBox(bh, pred.class);
+      if (pred.class === 'person' && dist < 150) {
+        const slow = Math.floor(state.motor.speed * 0.3);
+        sendBLE(`V${slow}`);
+      }
+      if (['car','truck','bus','motorcycle','bicycle'].includes(pred.class) && dist < state.motor.safeDist) {
+        motorCmd('S'); sendBLE('S');
+      }
+      if (pred.class === 'stop sign') {
+        const nowT = Date.now();
+        if (nowT - lastStopTime > STOP_COOLDOWN) {
+          lastStopTime = nowT;
+          onStopSignDetected(conf);
+        }
+      }
+      if (pred.class === 'traffic light') {
+        // couleur déterminée par HSV sur la zone bbox
+        const lightColor = classifyLightInBox(tempCtx, bx, by, bw, bh, W, H);
+        if (lightColor) handleTrafficLightAction(lightColor);
+      }
+    }
+
+    // ── Log throttlé (1 fois / 3s par classe) ────────────────
+    const now = Date.now();
+    if (!logThrottle[pred.class] || now - logThrottle[pred.class] > 3000) {
+      logThrottle[pred.class] = now;
+      log(`${info.label} détecté — conf: ${(conf*100).toFixed(0)}%`, 'info');
+    }
+  });
+}
+
+// Distance estimée (cm) depuis la hauteur de la bbox et la focale virtuelle
+function estimateDistFromBox(boxH, cls) {
+  const realH = { person:170, bicycle:110, motorcycle:120, car:150, truck:280, bus:300 };
+  const h = realH[cls] || 150;
+  return Math.round((h * 700) / Math.max(1, boxH));
+}
+
+// ════════════════════════════════════════════════════════════════
+// DÉTECTION LIGNES — 50% BAS de l'écran
+// Ligne gauche + Ligne droite + Centre + Anticipation
+// ════════════════════════════════════════════════════════════════
+function pixelMatchColor(r, g, b, t) {
+  return r>=t.r[0]&&r<=t.r[1]&&g>=t.g[0]&&g<=t.g[1]&&b>=t.b[0]&&b<=t.b[1];
 }
 
 function detectLines(ctx, imageData, W, H) {
@@ -2059,819 +2293,518 @@ function detectLines(ctx, imageData, W, H) {
     red:    { r:[150,255], g:[0,80],    b:[0,80],    color:'#ff2d55' },
     green:  { r:[0,80],    g:[120,255], b:[0,80],    color:'#00ff88' },
     yellow: { r:[180,255], g:[160,255], b:[0,80],    color:'#ffcc00' },
-    blue:   { r:[0,80],    g:[80,180],  b:[150,255], color:'#00d4ff' }
+    blue:   { r:[0,80],    g:[80,180],  b:[150,255], color:'#00d4ff' },
   };
-
   const target = colorMap[state.selectedColor];
   if (!target) return;
 
-  // ── ZONE D'ANALYSE : 50% bas uniquement ──────────────────
-  const yStart = Math.floor(H * 0.50);
-  // 6 rangées échantillonnées uniformément dans la moitié basse
-  const sampleFracs = [0.52, 0.60, 0.67, 0.75, 0.83, 0.92];
-
+  // Rangées d'analyse : 50%→95% hauteur
+  const sampleFracs = [0.52, 0.60, 0.68, 0.76, 0.84, 0.93];
   const leftPts  = [];
   const rightPts = [];
   const centerPts = [];
 
   sampleFracs.forEach(frac => {
     const y = Math.floor(frac * H);
-    let leftX  = -1;
-    let rightX = -1;
+    let leftX = -1, rightX = -1;
 
-    // Chercher ligne GAUCHE : balayer de gauche vers droite
-    // S'arrêter au premier pixel coloré dans le tiers gauche
-    const leftLimit = Math.floor(W * 0.55);
-    for (let x = 2; x < leftLimit; x += 2) {
-      const idx = (y * W + x) * 4;
-      if (pixelMatchesColor(data[idx], data[idx+1], data[idx+2], target)) {
-        leftX = x;
-        break;
-      }
+    // Ligne GAUCHE : balayage G→D, tiers gauche-centre
+    const lim = Math.floor(W * 0.55);
+    for (let x = 2; x < lim; x += 2) {
+      const i = (y*W+x)*4;
+      if (pixelMatchColor(data[i], data[i+1], data[i+2], target)) { leftX = x; break; }
     }
 
-    // Chercher ligne DROITE : balayer de droite vers gauche
-    // S'arrêter au premier pixel coloré dans le tiers droit
-    const rightLimit = Math.floor(W * 0.45);
-    for (let x = W - 2; x > rightLimit; x -= 2) {
-      const idx = (y * W + x) * 4;
-      if (pixelMatchesColor(data[idx], data[idx+1], data[idx+2], target)) {
-        rightX = x;
-        break;
-      }
+    // Ligne DROITE : balayage D→G, tiers droit-centre
+    const rim = Math.floor(W * 0.45);
+    for (let x = W-2; x > rim; x -= 2) {
+      const i = (y*W+x)*4;
+      if (pixelMatchColor(data[i], data[i+1], data[i+2], target)) { rightX = x; break; }
     }
 
     if (leftX  > 0) leftPts.push({ x: leftX,  y });
     if (rightX > 0) rightPts.push({ x: rightX, y });
 
-    // Centre entre les deux lignes détectées
+    // Centre entre les deux lignes
     if (leftX > 0 && rightX > 0 && rightX > leftX + 20) {
-      centerPts.push({ x: Math.round((leftX + rightX) / 2), y });
+      centerPts.push({ x: Math.round((leftX+rightX)/2), y });
     } else if (leftX > 0) {
-      // Seulement ligne gauche → estimer centre (ligne + marge droite fixe)
-      centerPts.push({ x: Math.round(leftX + W * 0.25), y });
+      centerPts.push({ x: Math.round(leftX + W*0.25), y });
     } else if (rightX > 0) {
-      // Seulement ligne droite → estimer centre
-      centerPts.push({ x: Math.round(rightX - W * 0.25), y });
+      centerPts.push({ x: Math.round(rightX - W*0.25), y });
     }
   });
 
-  const hasLeft  = leftPts.length  >= 2;
-  const hasRight = rightPts.length >= 2;
-  const hasCenter = centerPts.length >= 2;
-
-  if (!hasLeft && !hasRight) return;
-
-  // ── DESSIN LIGNE GAUCHE (cyan) ────────────────────────────
-  if (hasLeft) {
-    ctx.strokeStyle = '#00d4ff';
-    ctx.lineWidth = 3;
-    ctx.shadowColor = '#00d4ff';
-    ctx.shadowBlur = 8;
-    ctx.setLineDash([12, 6]);
+  // ── Dessin ligne GAUCHE (cyan pointillé) ─────────────────
+  if (leftPts.length >= 2) {
+    ctx.strokeStyle = '#00d4ff'; ctx.lineWidth = 3;
+    ctx.shadowColor = '#00d4ff'; ctx.shadowBlur = 8;
+    ctx.setLineDash([12,6]);
     ctx.beginPath();
     ctx.moveTo(leftPts[0].x, leftPts[0].y);
     leftPts.forEach(p => ctx.lineTo(p.x, p.y));
     ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.shadowBlur = 0;
-
-    // Points de contact
+    ctx.setLineDash([]); ctx.shadowBlur = 0;
     leftPts.forEach(p => {
       ctx.fillStyle = '#00d4ff';
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 5, 0, Math.PI*2);
-      ctx.fill();
+      ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI*2); ctx.fill();
     });
-
-    // Label
-    ctx.fillStyle = '#00d4ffCC';
-    ctx.font = 'bold 10px Share Tech Mono';
-    ctx.fillText('◄ GAUCHE', leftPts[0].x + 8, leftPts[0].y - 8);
+    ctx.fillStyle = 'rgba(0,212,255,0.8)';
+    ctx.font = 'bold 9px Share Tech Mono';
+    ctx.fillText('◄ GAUCHE', leftPts[0].x+6, leftPts[0].y-8);
+    lineState.lastLeftX = leftPts[leftPts.length-1].x;
   }
 
-  // ── DESSIN LIGNE DROITE (accent2 / vert) ─────────────────
-  if (hasRight) {
-    ctx.strokeStyle = target.color;
-    ctx.lineWidth = 3;
-    ctx.shadowColor = target.color;
-    ctx.shadowBlur = 8;
-    ctx.setLineDash([12, 6]);
+  // ── Dessin ligne DROITE (couleur sélectionnée, pointillé) ─
+  if (rightPts.length >= 2) {
+    ctx.strokeStyle = target.color; ctx.lineWidth = 3;
+    ctx.shadowColor = target.color; ctx.shadowBlur = 8;
+    ctx.setLineDash([12,6]);
     ctx.beginPath();
     ctx.moveTo(rightPts[0].x, rightPts[0].y);
     rightPts.forEach(p => ctx.lineTo(p.x, p.y));
     ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.shadowBlur = 0;
-
+    ctx.setLineDash([]); ctx.shadowBlur = 0;
     rightPts.forEach(p => {
       ctx.fillStyle = target.color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 5, 0, Math.PI*2);
-      ctx.fill();
+      ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI*2); ctx.fill();
     });
-
-    ctx.fillStyle = target.color + 'CC';
-    ctx.font = 'bold 10px Share Tech Mono';
+    ctx.fillStyle = target.color;
+    ctx.font = 'bold 9px Share Tech Mono';
     const rp = rightPts[0];
-    ctx.fillText('DROITE ►', rp.x - 70, rp.y - 8);
+    ctx.fillText('DROITE ►', rp.x-68, rp.y-8);
+    lineState.lastRightX = rightPts[rightPts.length-1].x;
   }
 
-  // ── DESSIN LIGNE DE CENTRE (jaune, tirets) ────────────────
-  if (hasCenter) {
-    ctx.strokeStyle = '#ffcc00';
-    ctx.lineWidth = 2;
-    ctx.shadowColor = '#ffcc00';
-    ctx.shadowBlur = 6;
-    ctx.setLineDash([8, 8]);
+  // ── Dessin ligne de CENTRE (jaune, tirets) ────────────────
+  if (centerPts.length >= 2) {
+    ctx.strokeStyle = '#ffcc00'; ctx.lineWidth = 2;
+    ctx.shadowColor = '#ffcc00'; ctx.shadowBlur = 6;
+    ctx.setLineDash([8,8]);
     ctx.beginPath();
     ctx.moveTo(centerPts[0].x, centerPts[0].y);
     centerPts.forEach(p => ctx.lineTo(p.x, p.y));
     ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.shadowBlur = 0;
-
-    // Point central (bas de l'image = position actuelle)
-    const botCenter = centerPts[centerPts.length - 1];
+    ctx.setLineDash([]); ctx.shadowBlur = 0;
+    const bot = centerPts[centerPts.length-1];
     ctx.fillStyle = '#ffcc00';
-    ctx.beginPath();
-    ctx.arc(botCenter.x, botCenter.y, 8, 0, Math.PI*2);
-    ctx.fill();
+    ctx.beginPath(); ctx.arc(bot.x, bot.y, 7, 0, Math.PI*2); ctx.fill();
   }
 
-  // ── LOGIQUE DE PILOTAGE AUTONOME ─────────────────────────
+  // ── Compteur lignes ───────────────────────────────────────
+  if (leftPts.length >= 2 || rightPts.length >= 2) {
+    state.counts.lines++;
+    const el = document.getElementById('cnt-lines');
+    if (el) el.textContent = state.counts.lines;
+  }
+
+  // ── Pilotage autonome avec anticipation ───────────────────
   if (state.auto && centerPts.length >= 2) {
-    // Erreur position = écart centre détecté vs centre écran
-    const botPt  = centerPts[centerPts.length - 1]; // position actuelle (bas)
-    const topPt  = centerPts[0];                     // position future (haut)
-    const midW   = W / 2;
+    const botPt = centerPts[centerPts.length-1];
+    const topPt = centerPts[0];
+    const midW  = W / 2;
 
-    const errCurrent = botPt.x - midW;   // erreur instantanée
-    const errFuture  = topPt.x - midW;   // erreur anticipée (haut = plus loin)
+    // Mélange 60% bas (position actuelle) + 40% haut (anticipation)
+    const errNow    = botPt.x - midW;
+    const errFuture = topPt.x - midW;
+    const errBlend  = errNow * 0.60 + errFuture * 0.40;
 
-    // Anticipation : pondérer 60% position actuelle + 40% future
-    const errBlended = errCurrent * 0.6 + errFuture * 0.4;
-
-    // Historique lissage (5 dernières valeurs)
-    lineState.steerHistory.push(errBlended);
+    // Lissage sur 5 frames
+    lineState.steerHistory.push(errBlend);
     if (lineState.steerHistory.length > 5) lineState.steerHistory.shift();
-    const errSmooth = lineState.steerHistory.reduce((a,b) => a+b, 0)
-                    / lineState.steerHistory.length;
+    const errSmooth = lineState.steerHistory.reduce((a,b)=>a+b,0) / lineState.steerHistory.length;
 
-    const DEAD_ZONE   = W * 0.07;  // 7% largeur = zone neutre
-    const HARD_TURN   = W * 0.20;  // 20% = virage marqué
+    const DEAD   = W * 0.07;
+    const STRONG = W * 0.20;
 
     let cmd;
-    if      (errSmooth >  HARD_TURN)  cmd = 'R';
-    else if (errSmooth < -HARD_TURN)  cmd = 'L';
-    else if (errSmooth >  DEAD_ZONE)  cmd = 'R';
-    else if (errSmooth < -DEAD_ZONE)  cmd = 'L';
-    else                              cmd = 'F';
+    if      (errSmooth >  STRONG) cmd = 'R';
+    else if (errSmooth < -STRONG) cmd = 'L';
+    else if (errSmooth >  DEAD)   cmd = 'R';
+    else if (errSmooth < -DEAD)   cmd = 'L';
+    else                          cmd = 'F';
 
-    sendBLE(cmd);
-    updateMotorUI(cmd);
+    sendBLE(cmd); updateMotorUI(cmd);
 
-    // Afficher vecteur de correction sur le canvas
-    const arrowX = W / 2;
-    const arrowY = H * 0.52;
-    ctx.strokeStyle = '#ffcc00';
-    ctx.lineWidth = 2;
+    // Flèche de correction
+    ctx.strokeStyle = '#ffcc00cc'; ctx.lineWidth = 2;
+    const ax = W/2, ay = H*0.52;
     ctx.beginPath();
-    ctx.moveTo(arrowX, arrowY);
-    ctx.lineTo(arrowX + errSmooth * 0.3, arrowY - 20);
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(ax + errSmooth*0.25, ay - 18);
     ctx.stroke();
   }
-
-  // Mémoriser les positions des lignes pour detectColorObstacle
-  if (leftPts.length  > 0) lineState.lastLeftX  = leftPts[leftPts.length-1].x;
-  if (rightPts.length > 0) lineState.lastRightX = rightPts[rightPts.length-1].x;
-
-  state.counts.lines++;
-  document.getElementById('cnt-lines').textContent = state.counts.lines;
-
-  // Mise à jour badge lignes
-  const linesBadges = document.getElementById('linesBadges');
-  const parts = [];
-  if (hasLeft)   parts.push(`<span style="font-family:'Share Tech Mono',monospace;font-size:0.6rem;padding:2px 6px;border:1px solid #00d4ff;border-radius:3px;color:#00d4ff;">◄ G:${leftPts.length}</span>`);
-  if (hasRight)  parts.push(`<span style="font-family:'Share Tech Mono',monospace;font-size:0.6rem;padding:2px 6px;border:1px solid ${target.color};border-radius:3px;color:${target.color};">D:${rightPts.length} ►</span>`);
-  if (hasCenter) parts.push(`<span style="font-family:'Share Tech Mono',monospace;font-size:0.6rem;padding:2px 6px;border:1px solid #ffcc00;border-radius:3px;color:#ffcc00;">⊕ CTR</span>`);
-  if (parts.length) linesBadges.innerHTML = parts.join('');
 }
 
-// ============================================================
-// DÉTECTION PANNEAU STOP — Analyse pixel réelle
-// ============================================================
-// Algorithme :
-//  1. Diviser l'image en cellules de 20×20 px (grille)
-//  2. Pour chaque cellule, compter les pixels "rouge STOP"
-//     (rouge dominant, saturation élevée, hue ~0°/360°)
-//  3. Identifier les zones candidates : ≥40% pixels rouges
-//  4. Fusionner les zones adjacentes → bounding box
-//  5. Filtrer par ratio largeur/hauteur (carré/octogone ~1:1)
-//  6. Seuil de confiance = surface_rouge / surface_bbox
-// ============================================================
-
-// Cooldowns anti-flood (ms)
-const STOP_COOLDOWN = 4000;
-const LIGHT_COOLDOWN = 1000;
-let lastStopTime = 0;
-let lastLightTime = 0;
-let lastLightState = null;
-
+// ════════════════════════════════════════════════════════════════
+// DÉTECTION PANNEAU STOP — HSV pixel, moitié droite
+// ════════════════════════════════════════════════════════════════
 function isRedStop(r, g, b) {
-  // Rouge STOP : rouge très dominant, peu de vert/bleu
-  // Hue ≈ 0-15° ou 345-360° en HSV
-  if (r < 120) return false;
-  if (r < g * 1.6) return false;
-  if (r < b * 1.6) return false;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const sat = max === 0 ? 0 : (max - min) / max;
-  return sat > 0.45 && r === max;
+  if (r < 120 || r < g*1.6 || r < b*1.6) return false;
+  const max = Math.max(r,g,b), min = Math.min(r,g,b);
+  return max > 0 && (max-min)/max > 0.45 && r === max;
 }
 
 function detectStopSign(ctx, imageData, W, H) {
   const data = imageData.data;
   const CELL = 20;
-  // ── ZONE : moitié DROITE uniquement ──────────────────────
-  const xZoneStart = Math.floor(W * 0.50);
-  const colStart   = Math.floor(xZoneStart / CELL);
-  const cols       = Math.floor(W / CELL);
-  const rows       = Math.floor(H / CELL);
-  const MIN_RED_RATIO = 0.38;
-  const MIN_CELLS = 4;
+  const xZone = Math.floor(W * 0.50); // moitié droite
+  const colStart = Math.floor(xZone / CELL);
+  const cols = Math.floor(W / CELL);
+  const rows = Math.floor(H / CELL);
+  const MIN_RED = 0.38, MIN_CELLS = 4;
 
   const redMap = new Uint8Array(cols * rows);
-
   for (let row = 0; row < rows; row++) {
-    for (let col = colStart; col < cols; col++) {  // ← départ col droite
-      let redCount = 0, total = 0;
-      const x0 = col * CELL, y0 = row * CELL;
-      for (let dy = 0; dy < CELL; dy += 2) {
-        for (let dx = 0; dx < CELL; dx += 2) {
-          const px = x0 + dx, py = y0 + dy;
-          if (px >= W || py >= H) continue;
-          const idx = (py * W + px) * 4;
-          if (isRedStop(data[idx], data[idx+1], data[idx+2])) redCount++;
-          total++;
-        }
+    for (let col = colStart; col < cols; col++) {
+      let rc=0, tot=0;
+      const x0=col*CELL, y0=row*CELL;
+      for (let dy=0; dy<CELL; dy+=2) for (let dx=0; dx<CELL; dx+=2) {
+        const px=x0+dx, py=y0+dy;
+        if (px>=W||py>=H) continue;
+        const i=(py*W+px)*4;
+        if (isRedStop(data[i],data[i+1],data[i+2])) rc++;
+        tot++;
       }
-      if (total > 0) redMap[row * cols + col] = (redCount / total) >= MIN_RED_RATIO ? 1 : 0;
+      if (tot>0) redMap[row*cols+col] = (rc/tot)>=MIN_RED ? 1 : 0;
     }
   }
 
-  // Détection de blobs (BFS)
-  const visited = new Uint8Array(cols * rows);
+  // BFS blobs
+  const visited = new Uint8Array(cols*rows);
   const blobs = [];
-
-  for (let i = 0; i < redMap.length; i++) {
-    const col = i % cols;
-    if (col < colStart) continue;  // ignorer moitié gauche
-    if (!redMap[i] || visited[i]) continue;
-    const queue = [i];
-    visited[i] = 1;
-    let cells = [];
+  for (let i=0; i<redMap.length; i++) {
+    if (i%cols < colStart || !redMap[i] || visited[i]) continue;
+    const queue=[i]; visited[i]=1; const cells=[];
     while (queue.length) {
-      const cur = queue.shift();
-      cells.push(cur);
-      const r = Math.floor(cur / cols), c = cur % cols;
-      [[r-1,c],[r+1,c],[r,c-1],[r,c+1]].forEach(([nr,nc]) => {
-        if (nr<0||nr>=rows||nc<0||nc>=cols||nc<colStart) return;
-        const ni = nr*cols+nc;
-        if (!visited[ni] && redMap[ni]) { visited[ni]=1; queue.push(ni); }
+      const cur=queue.shift(); cells.push(cur);
+      const r=Math.floor(cur/cols), c=cur%cols;
+      [[r-1,c],[r+1,c],[r,c-1],[r,c+1]].forEach(([nr,nc])=>{
+        if(nr<0||nr>=rows||nc<0||nc>=cols||nc<colStart) return;
+        const ni=nr*cols+nc;
+        if(!visited[ni]&&redMap[ni]){visited[ni]=1;queue.push(ni);}
       });
     }
-    if (cells.length >= MIN_CELLS) blobs.push(cells);
+    if (cells.length>=MIN_CELLS) blobs.push(cells);
   }
 
-  let bestBlob = null, bestScore = 0;
-  blobs.forEach(cells => {
-    let minC=cols, maxC=0, minR=rows, maxR=0;
-    cells.forEach(i => {
-      const r=Math.floor(i/cols), c=i%cols;
-      minC=Math.min(minC,c); maxC=Math.max(maxC,c);
-      minR=Math.min(minR,r); maxR=Math.max(maxR,r);
-    });
-    const blobW=(maxC-minC+1)*CELL, blobH=(maxR-minR+1)*CELL;
-    const ratio = blobW/blobH;
-    if (ratio < 0.55 || ratio > 1.7) return;
-    const score = cells.length * (ratio>0.8&&ratio<1.25?1.3:1.0);
-    if (score > bestScore) {
-      bestScore = score;
-      bestBlob = { x:minC*CELL, y:minR*CELL, w:blobW, h:blobH,
-                   conf:Math.min(0.98, 0.5+cells.length*0.04) };
-    }
+  // Meilleur blob
+  let best=null, bestScore=0;
+  blobs.forEach(cells=>{
+    let minC=cols,maxC=0,minR=rows,maxR=0;
+    cells.forEach(i=>{const r=Math.floor(i/cols),c=i%cols;
+      minC=Math.min(minC,c);maxC=Math.max(maxC,c);
+      minR=Math.min(minR,r);maxR=Math.max(maxR,r);});
+    const bw=(maxC-minC+1)*CELL, bh=(maxR-minR+1)*CELL;
+    const ratio=bw/bh;
+    if(ratio<0.55||ratio>1.7) return;
+    const score=cells.length*(ratio>0.8&&ratio<1.25?1.3:1.0);
+    if(score>bestScore){bestScore=score;
+      best={x:minC*CELL,y:minR*CELL,w:bw,h:bh,conf:Math.min(0.98,0.5+cells.length*0.04)};}
   });
 
-  // Dessiner zone d'analyse (contour semi-transparent droit)
-  ctx.strokeStyle = 'rgba(255,45,85,0.12)';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([4,8]);
-  ctx.strokeRect(xZoneStart, 0, W - xZoneStart, H);
-  ctx.setLineDash([]);
-
-  if (bestBlob && bestBlob.conf > 0.52) {
-    const b = bestBlob;
-    drawBBox(ctx, b.x, b.y, b.w, b.h, '#ff2d55', '🛑 STOP', b.conf);
-    const cx=b.x+b.w/2, cy=b.y+b.h/2;
-    const radius=Math.min(b.w,b.h)*0.4;
+  if (best && best.conf > 0.52) {
+    const b=best;
+    drawBBoxAI(ctx, b.x, b.y, b.w, b.h, '#ff2d55', '🛑 STOP-HSV', b.conf);
+    // Octogone
+    const cx=b.x+b.w/2, cy=b.y+b.h/2, r=Math.min(b.w,b.h)*0.4;
     ctx.strokeStyle='#ff2d55'; ctx.lineWidth=3;
     ctx.shadowColor='#ff2d55'; ctx.shadowBlur=10;
     ctx.beginPath();
-    for (let i=0;i<8;i++) {
-      const angle=(i*Math.PI/4)-Math.PI/8;
-      const px=cx+radius*Math.cos(angle), py=cy+radius*Math.sin(angle);
-      i===0?ctx.moveTo(px,py):ctx.lineTo(px,py);
+    for(let i=0;i<8;i++){
+      const a=(i*Math.PI/4)-Math.PI/8;
+      i===0?ctx.moveTo(cx+r*Math.cos(a),cy+r*Math.sin(a)):ctx.lineTo(cx+r*Math.cos(a),cy+r*Math.sin(a));
     }
     ctx.closePath(); ctx.stroke(); ctx.shadowBlur=0;
     const now=Date.now();
-    if (now-lastStopTime>STOP_COOLDOWN) { lastStopTime=now; onStopSignDetected(b.conf); }
-    updateSignPanel('stop', b.conf);
+    if(now-lastStopTime>STOP_COOLDOWN){lastStopTime=now;onStopSignDetected(b.conf);}
+    updateSignPanel('stop',b.conf);
   } else {
-    if (!state.stopCountdown) clearSignPanel('stop');
+    if(!state.stopCountdown) clearSignPanel('stop');
   }
 }
 
 function onStopSignDetected(conf) {
   state.counts.stop++;
-  document.getElementById('cnt-stop').textContent = state.counts.stop;
-  log(`🛑 STOP détecté (conf: ${(conf*100).toFixed(0)}%) — Arrêt 2s`, 'danger');
+  const el=document.getElementById('cnt-stop');
+  if(el) el.textContent=state.counts.stop;
+  log(`🛑 STOP détecté (${(conf*100).toFixed(0)}%) — Arrêt 2s`,'danger');
   triggerStop();
 }
 
-// ============================================================
-// DÉTECTION FEUX DE SIGNALISATION — Analyse pixel réelle
-// ============================================================
-// Algorithme :
-//  1. Chercher une zone verticale sombre (boîtier feu)
-//  2. Dans cette zone, détecter les cercles de couleur :
-//     - ROUGE  : hue 0-15° ou 345-360°, sat>50%, val>40%
-//     - ORANGE : hue 15-40°, sat>50%, val>40%
-//     - VERT   : hue 90-150°, sat>40%, val>35%
-//  3. La couleur dominante dans la moitié supérieure/centrale/basse
-//     détermine l'état du feu
-//  4. Ratio de pixels colorés / zone totale = confiance
-// ============================================================
-
-function rgbToHsv(r, g, b) {
-  r /= 255; g /= 255; b /= 255;
-  const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  const d = max - min;
-  let h = 0, s = max === 0 ? 0 : d / max, v = max;
-  if (d !== 0) {
-    if (max === r) h = ((g - b) / d) % 6;
-    else if (max === g) h = (b - r) / d + 2;
-    else h = (r - g) / d + 4;
-    h = ((h * 60) + 360) % 360;
+// ════════════════════════════════════════════════════════════════
+// DÉTECTION FEUX — HSV pixel, moitié droite, 65% haut
+// ════════════════════════════════════════════════════════════════
+function rgbToHsv(r,g,b) {
+  r/=255; g/=255; b/=255;
+  const max=Math.max(r,g,b), min=Math.min(r,g,b), d=max-min;
+  let h=0, s=max===0?0:d/max, v=max;
+  if(d!==0){
+    if(max===r) h=((g-b)/d)%6;
+    else if(max===g) h=(b-r)/d+2;
+    else h=(r-g)/d+4;
+    h=((h*60)+360)%360;
   }
-  return { h, s, v };
+  return {h,s,v};
 }
 
-function classifyLightPixel(r, g, b) {
-  const { h, s, v } = rgbToHsv(r, g, b);
-  if (v < 0.25 || s < 0.3) return null; // trop sombre ou gris
-
-  if ((h <= 18 || h >= 342) && s > 0.5) return 'red';     // rouge
-  if (h > 18  && h <= 42   && s > 0.5) return 'orange';   // orange/jaune
-  if (h > 85  && h <= 155  && s > 0.4) return 'green';    // vert
+function classifyLightPixel(r,g,b) {
+  const {h,s,v}=rgbToHsv(r,g,b);
+  if(v<0.25||s<0.3) return null;
+  if((h<=18||h>=342)&&s>0.5) return 'red';
+  if(h>18&&h<=42&&s>0.5)     return 'orange';
+  if(h>85&&h<=155&&s>0.4)    return 'green';
   return null;
 }
 
-function detectTrafficLight(ctx, imageData, W, H) {
-  const data = imageData.data;
-  const STEP = 3;
-  // ── ZONE : moitié DROITE, partie haute (feux en hauteur) ─
-  const xStart  = Math.floor(W * 0.50);
-  const scanH   = Math.floor(H * 0.65);
-
-  let redPts=[], orangePts=[], greenPts=[];
-
-  for (let y = 0; y < scanH; y += STEP) {
-    for (let x = xStart; x < W; x += STEP) {  // ← x part de 50%
-      const idx = (y * W + x) * 4;
-      const col = classifyLightPixel(data[idx], data[idx+1], data[idx+2]);
-      if      (col === 'red')    redPts.push({x, y});
-      else if (col === 'orange') orangePts.push({x, y});
-      else if (col === 'green')  greenPts.push({x, y});
+// Utilisé par COCO pour affiner la couleur d'un feu détecté
+function classifyLightInBox(ctx2d, bx, by, bw, bh, W, H) {
+  const x0=Math.max(0,Math.floor(bx)), y0=Math.max(0,Math.floor(by));
+  const x1=Math.min(W,Math.floor(bx+bw)), y1=Math.min(H,Math.floor(by+bh));
+  let red=0,orange=0,green=0;
+  try {
+    const d=ctx2d.getImageData(x0,y0,x1-x0,y1-y0).data;
+    for(let i=0;i<d.length;i+=8) {
+      const c=classifyLightPixel(d[i],d[i+1],d[i+2]);
+      if(c==='red') red++;
+      else if(c==='orange') orange++;
+      else if(c==='green') green++;
     }
+  } catch(_){}
+  const mx=Math.max(red,orange,green);
+  if(mx<3) return null;
+  if(mx===red) return 'red';
+  if(mx===orange) return 'orange';
+  return 'green';
+}
+
+function detectTrafficLight(ctx, imageData, W, H) {
+  const data=imageData.data;
+  const xStart=Math.floor(W*0.50), scanH=Math.floor(H*0.65);
+  let redPts=[],orangePts=[],greenPts=[];
+  for(let y=0;y<scanH;y+=3) for(let x=xStart;x<W;x+=3) {
+    const i=(y*W+x)*4;
+    const c=classifyLightPixel(data[i],data[i+1],data[i+2]);
+    if(c==='red') redPts.push({x,y});
+    else if(c==='orange') orangePts.push({x,y});
+    else if(c==='green') greenPts.push({x,y});
   }
 
-  const MIN_PIXELS = 18;
-  const hasRed    = redPts.length    >= MIN_PIXELS;
-  const hasOrange = orangePts.length >= MIN_PIXELS;
-  const hasGreen  = greenPts.length  >= MIN_PIXELS;
+  const MIN=18;
+  const hasR=redPts.length>=MIN, hasO=orangePts.length>=MIN, hasG=greenPts.length>=MIN;
+  if(!hasR&&!hasO&&!hasG){clearSignPanel('light');return;}
 
-  // Dessiner zone d'analyse feux (même zone que STOP)
-  // (déjà dessinée par detectStopSign, on n'en ajoute pas une autre)
+  let dom=null, pts=[];
+  if(hasR&&redPts.length>=orangePts.length&&redPts.length>=greenPts.length){dom='red';pts=redPts;}
+  else if(hasO&&orangePts.length>=greenPts.length){dom='orange';pts=orangePts;}
+  else if(hasG){dom='green';pts=greenPts;}
+  if(!dom) return;
 
-  if (!hasRed && !hasOrange && !hasGreen) {
-    clearSignPanel('light');
-    return;
-  }
-
-  let dominantColor = null, dominantPts = [];
-  if (hasRed && redPts.length>=orangePts.length && redPts.length>=greenPts.length) {
-    dominantColor='red'; dominantPts=redPts;
-  } else if (hasOrange && orangePts.length>=greenPts.length) {
-    dominantColor='orange'; dominantPts=orangePts;
-  } else if (hasGreen) {
-    dominantColor='green'; dominantPts=greenPts;
-  }
-  if (!dominantColor) return;
-
-  let minX=W, maxX=0, minY=H, maxY=0;
-  const sample = dominantPts.slice(0, Math.min(dominantPts.length, 200));
-  sample.forEach(p => {
-    minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x);
-    minY=Math.min(minY,p.y); maxY=Math.max(maxY,p.y);
-  });
-
+  const sample=pts.slice(0,200);
+  let minX=W,maxX=0,minY=H,maxY=0;
+  sample.forEach(p=>{minX=Math.min(minX,p.x);maxX=Math.max(maxX,p.x);
+                      minY=Math.min(minY,p.y);maxY=Math.max(maxY,p.y);});
   const bw=maxX-minX+20, bh=maxY-minY+20;
-  const bx=Math.max(xStart, minX-10), by=Math.max(0, minY-10);
-  if (bw < 12 || bh < 12) return;
+  const bx=Math.max(xStart,minX-10), by=Math.max(0,minY-10);
+  if(bw<12||bh<12) return;
 
-  const conf = Math.min(0.97, 0.45 + dominantPts.length * 0.008);
-  const colorMap = {
-    red:    { hex:'#ff2d55', label:'🔴 FEU ROUGE',  action:'ARRÊT OBLIGATOIRE',       badgeEl:'badge-red' },
-    orange: { hex:'#ff9500', label:'🟡 FEU ORANGE', action:'RALENTIR — PRÉPAREZ-VOUS', badgeEl:'badge-yield' },
-    green:  { hex:'#00ff88', label:'🟢 FEU VERT',   action:'PASSAGE AUTORISÉ',         badgeEl:'badge-green-light' }
+  const conf=Math.min(0.97,0.45+pts.length*0.008);
+  const CM={
+    red:    {hex:'#ff2d55',label:'🔴 FEU ROUGE',  action:'ARRÊT OBLIGATOIRE',       badgeEl:'badge-red'},
+    orange: {hex:'#ff9500',label:'🟡 FEU ORANGE', action:'RALENTIR — PRÉPAREZ-VOUS', badgeEl:'badge-yield'},
+    green:  {hex:'#00ff88',label:'🟢 FEU VERT',   action:'PASSAGE AUTORISÉ',         badgeEl:'badge-green-light'},
   };
-  const cm = colorMap[dominantColor];
+  const cm=CM[dom];
 
-  drawBBox(ctx, bx, by, bw, bh, cm.hex, cm.label, conf);
-  const cx=bx+bw/2, cy=by+bh/2, radius=Math.min(bw,bh)*0.35;
-  ctx.beginPath(); ctx.arc(cx,cy,radius,0,Math.PI*2);
+  drawBBoxAI(ctx,bx,by,bw,bh,cm.hex,cm.label,conf);
+  const cx=bx+bw/2, cy=by+bh/2, rad=Math.min(bw,bh)*0.35;
+  ctx.beginPath(); ctx.arc(cx,cy,rad,0,Math.PI*2);
   ctx.strokeStyle=cm.hex; ctx.lineWidth=3;
   ctx.shadowColor=cm.hex; ctx.shadowBlur=15;
-  ctx.stroke();
-  ctx.fillStyle=cm.hex+'30'; ctx.fill(); ctx.shadowBlur=0;
+  ctx.stroke(); ctx.fillStyle=cm.hex+'30'; ctx.fill(); ctx.shadowBlur=0;
 
   const now=Date.now();
-  if (dominantColor!==lastLightState || now-lastLightTime>LIGHT_COOLDOWN*3) {
-    lastLightState=dominantColor; lastLightTime=now;
-    onTrafficLightDetected(dominantColor, conf, cm);
+  if(dom!==lastLightState||now-lastLightTime>LIGHT_COOLDOWN*3){
+    lastLightState=dom; lastLightTime=now;
+    onTrafficLightDetected(dom,conf,cm);
   }
-  updateSignPanel('light', conf, cm);
+  updateSignPanel('light',conf,cm);
   document.querySelectorAll('.det-badge[id^="badge-"]').forEach(b=>b.classList.remove('active','warning','danger'));
-  const badgeEl=document.getElementById(cm.badgeEl);
-  if (badgeEl) badgeEl.classList.add(dominantColor==='red'?'danger':dominantColor==='orange'?'warning':'active');
+  const bEl=document.getElementById(cm.badgeEl);
+  if(bEl) bEl.classList.add(dom==='red'?'danger':dom==='orange'?'warning':'active');
+}
+
+function handleTrafficLightAction(color) {
+  const now=Date.now();
+  if(now-lastLightTime<LIGHT_COOLDOWN) return;
+  lastLightTime=now;
+  if(!state.auto) return;
+  if(color==='red'){ motorCmd('S'); sendBLE('S'); }
+  else if(color==='orange'){ sendBLE(`V${Math.floor(state.motor.speed*0.5)}`); }
+  else if(color==='green'){
+    sendBLE(`V${state.motor.speed}`);
+    if(state.motor.direction==='S'){ motorCmd('F'); }
+  }
 }
 
 function onTrafficLightDetected(color, conf, cm) {
   state.counts.lights++;
-  document.getElementById('cnt-lights').textContent = state.counts.lights;
-  log(`${cm.label} détecté (conf: ${(conf*100).toFixed(0)}%) — ${cm.action}`, color === 'red' ? 'danger' : color === 'orange' ? 'warning' : 'success');
-
-  // Action automatique en mode autonome
-  if (state.auto) {
-    if (color === 'red') {
-      motorCmd('S');
-      sendBLE('S');
-      log('🤖 AUTO: Arrêt — feu rouge', 'danger');
-    } else if (color === 'orange') {
-      // Réduire vitesse à 50%
-      const slowSpeed = Math.floor(state.motor.speed * 0.5);
-      sendBLE(`V${slowSpeed}`);
-      log('🤖 AUTO: Ralentissement — feu orange', 'warning');
-    } else if (color === 'green') {
-      sendBLE(`V${state.motor.speed}`);
-      if (state.motor.direction === 'S') {
-        motorCmd('F');
-        log('🤖 AUTO: Reprise — feu vert', 'success');
-      }
-    }
-  }
+  const el=document.getElementById('cnt-lights');
+  if(el) el.textContent=state.counts.lights;
+  log(`${cm.label} (${(conf*100).toFixed(0)}%) — ${cm.action}`,color==='red'?'danger':color==='orange'?'warning':'success');
+  handleTrafficLightAction(color);
 }
 
-// ============================================================
-// DÉTECTION OBSTACLE / VÉHICULE / CYCLISTE
-// Zone : ENTRE les deux lignes détectées (couloir de circulation)
-//        50% haut → 50% bas (partie visible de la route devant)
-// ============================================================
-function detectColorObstacle(ctx, imageData, W, H) {
-  const data = imageData.data;
-  const STEP = 4;
+// ════════════════════════════════════════════════════════════════
+// DRAWBBOX — Style HUD IA
+// ════════════════════════════════════════════════════════════════
+function drawBBoxAI(ctx, x, y, w, h, color, label, conf) {
+  // Boîte principale
+  ctx.strokeStyle = color; ctx.lineWidth = 2;
+  ctx.shadowColor = color; ctx.shadowBlur = 8;
+  ctx.strokeRect(x, y, w, h); ctx.shadowBlur = 0;
 
-  // Récupérer les limites gauche/droite des lignes si disponibles
-  // lineState est mis à jour dans detectLines
-  const leftBound  = lineState.lastLeftX  || Math.floor(W * 0.20);
-  const rightBound = lineState.lastRightX || Math.floor(W * 0.80);
+  // Coins marqués
+  const cs = Math.min(12, w*0.2, h*0.2);
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  [[x,y],[x+w,y],[x,y+h],[x+w,y+h]].forEach(([cx,cy])=>{
+    const dx=cx===x?1:-1, dy=cy===y?1:-1;
+    ctx.moveTo(cx, cy+dy*cs); ctx.lineTo(cx,cy); ctx.lineTo(cx+dx*cs,cy);
+  });
+  ctx.stroke();
 
-  // Zone entre les lignes, 50% haut → seulement la moitié haute
-  // de la zone route (pour voir ce qui vient en face, pas le sol)
-  const x0 = leftBound  + Math.floor((rightBound - leftBound) * 0.05);
-  const x1 = rightBound - Math.floor((rightBound - leftBound) * 0.05);
-  const y0 = Math.floor(H * 0.25);
-  const y1 = Math.floor(H * 0.58);
+  // Fond label
+  const pct = `${(conf*100).toFixed(0)}%`;
+  const fullLabel = `${label} ${pct}`;
+  ctx.font = 'bold 11px Share Tech Mono';
+  const tw = ctx.measureText(fullLabel).width + 10;
+  ctx.fillStyle = color + 'CC';
+  ctx.fillRect(x, Math.max(0,y-22), tw, 20);
+  ctx.fillStyle = '#000';
+  ctx.fillText(fullLabel, x+4, Math.max(14,y-7));
 
-  if (x1 <= x0 + 20) return; // zone trop étroite
-
-  let darkCount = 0, total = 0;
-
-  for (let y = y0; y < y1; y += STEP) {
-    for (let x = x0; x < x1; x += STEP) {
-      const idx = (y * W + x) * 4;
-      const brightness = (data[idx] + data[idx+1] + data[idx+2]) / 3;
-      if (brightness < 65) darkCount++;
-      total++;
-    }
-  }
-
-  const ratio = darkCount / total;
-
-  if (ratio > 0.28) {
-    const conf = Math.min(0.95, 0.38 + ratio * 1.6);
-    const label = ratio > 0.55 ? '🚗 VÉHICULE' : ratio > 0.40 ? '🚴 CYCLISTE' : '⬛ OBSTACLE';
-    const color = ratio > 0.55 ? '#00d4ff' : ratio > 0.40 ? '#ff6b35' : '#ff9500';
-
-    drawBBox(ctx, x0, y0, x1-x0, y1-y0, color, label, conf);
-
-    if (label.includes('VÉHICULE')) {
-      state.counts.vehicles++;
-      document.getElementById('cnt-vehicles').textContent = state.counts.vehicles;
-      updateDetBadge('db-car', state.counts.vehicles, 'active');
-      log(`🚗 Véhicule dans le couloir (conf:${(conf*100).toFixed(0)}%)`, 'warning');
-    } else if (label.includes('CYCLISTE')) {
-      state.counts.cyclists++;
-      document.getElementById('cnt-cyclists').textContent = state.counts.cyclists;
-      updateDetBadge('db-cyc', state.counts.cyclists, 'warning');
-      log(`🚴 Cycliste détecté (conf:${(conf*100).toFixed(0)}%)`, 'warning');
-    } else {
-      state.counts.obstacles++;
-      document.getElementById('cnt-obstacles').textContent = state.counts.obstacles;
-      updateDetBadge('db-obs', state.counts.obstacles, 'danger');
-    }
-
-    const estDist = Math.max(10, Math.round(90 * (1 - ratio)));
-    simulateDistance(estDist);
-
-    if (state.auto && estDist < state.motor.safeDist) {
-      motorCmd('S');
-      sendBLE('S');
-      log(`⛔ Obstacle dans le couloir (~${estDist}cm) — Arrêt`, 'danger');
-    }
-  }
+  // Barre de confiance
+  ctx.fillStyle = color + '30';
+  ctx.fillRect(x+1, y+h-5, (w-2)*(conf), 4);
+  ctx.fillStyle = color + 'CC';
+  ctx.fillRect(x+1, y+h-5, (w-2)*conf, 4);
 }
 
-// ============================================================
-// DÉTECTION PIÉTONS — Totalité de l'écran
-// ============================================================
-// Cherche des silhouettes verticales (ratio hauteur/largeur > 1.8)
-// avec mouvement ou contraste fort sur fond clair
-// ============================================================
-const pedState = { lastTime: 0, cooldown: 2500 };
-
-function detectPedestrians(ctx, imageData, W, H) {
-  if (!state.detections.pedestrian) return;
-  const data = imageData.data;
-  const CELL = 16;
-  const cols = Math.floor(W / CELL);
-  const rows = Math.floor(H / CELL);
-
-  // Carte de contraste (zones à fort contraste vertical = silhouette)
-  const contrastMap = new Float32Array(cols * rows);
-
-  for (let row = 1; row < rows - 1; row++) {
-    for (let col = 0; col < cols; col++) {
-      const x = col * CELL + CELL/2;
-      const y = row * CELL + CELL/2;
-
-      // Gradient vertical
-      const idxTop = ((row-1)*CELL*W + x) * 4;
-      const idxBot = ((row+1)*CELL*W + x) * 4;
-
-      const bTop = (data[idxTop]   + data[idxTop+1]   + data[idxTop+2])   / 3;
-      const bBot = (data[idxBot]   + data[idxBot+1]   + data[idxBot+2])   / 3;
-      const bMid = (data[(row*CELL*W+x)*4] + data[(row*CELL*W+x)*4+1] + data[(row*CELL*W+x)*4+2]) / 3;
-
-      // Score contraste
-      contrastMap[row * cols + col] = Math.abs(bTop - bBot) + Math.abs(bMid - bTop);
-    }
-  }
-
-  // Chercher des colonnes à fort score vertical sur ≥3 cellules consécutives
-  const CONTRAST_THRESH = 35;
-  const MIN_HEIGHT_CELLS = 3;
-
-  for (let col = 0; col < cols; col++) {
-    let streak = 0, startRow = 0;
-    for (let row = 0; row < rows; row++) {
-      if (contrastMap[row * cols + col] > CONTRAST_THRESH) {
-        if (streak === 0) startRow = row;
-        streak++;
-        if (streak >= MIN_HEIGHT_CELLS) {
-          // Silhouette verticale trouvée
-          const bx = col * CELL - 10;
-          const by = startRow * CELL;
-          const bw = CELL + 20;
-          const bh = streak * CELL;
-          const ratio = bh / bw;
-
-          if (ratio > 1.6 && bw < W * 0.20) { // filtre: vertical et pas trop large
-            const conf = Math.min(0.90, 0.40 + streak * 0.08);
-            drawBBox(ctx, Math.max(0,bx), by, Math.min(bw, W-bx), bh, '#ffcc00', '🚶 PIÉTON', conf);
-
-            const now = Date.now();
-            if (now - pedState.lastTime > pedState.cooldown) {
-              pedState.lastTime = now;
-              state.counts.pedestrian++;
-              document.getElementById('cnt-pedestrian').textContent = state.counts.pedestrian;
-              updateDetBadge('db-ped', state.counts.pedestrian, 'warning');
-              log(`🚶 Piéton détecté (conf:${(conf*100).toFixed(0)}%) — Ralentissement`, 'warning');
-              if (state.auto) {
-                const slowSpeed = Math.floor(state.motor.speed * 0.4);
-                sendBLE(`V${slowSpeed}`);
-              }
-            }
-            break; // une détection par colonne
-          }
-        }
-      } else {
-        streak = 0;
-      }
-    }
-  }
+// Alias pour compatibilité avec updateSignPanel / drawGuide etc
+function drawBBox(ctx, x, y, w, h, color, label, conf) {
+  drawBBoxAI(ctx, x, y, w, h, color, label, conf);
 }
 
-// ============================================================
-// HELPERS PANNEAU INFO
-// ============================================================
+// ════════════════════════════════════════════════════════════════
+// HUD GUIDE — Zones de détection visuelles
+// ════════════════════════════════════════════════════════════════
+function drawGuide(ctx, W, H) {
+  // Ligne de séparation 50% (zone lignes)
+  ctx.strokeStyle = 'rgba(0,212,255,0.15)';
+  ctx.lineWidth = 1; ctx.setLineDash([5,10]);
+  ctx.beginPath(); ctx.moveTo(0,H*0.50); ctx.lineTo(W,H*0.50); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(0,212,255,0.4)';
+  ctx.font = '9px Share Tech Mono';
+  ctx.fillText('▼ ZONE LIGNES', 4, H*0.50+12);
+
+  // Zone STOP/FEUX (moitié droite)
+  ctx.strokeStyle = 'rgba(255,45,85,0.08)';
+  ctx.setLineDash([3,8]);
+  ctx.strokeRect(Math.floor(W*0.50), 0, Math.floor(W*0.50), H*0.65);
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(255,45,85,0.35)';
+  ctx.font = '9px Share Tech Mono';
+  ctx.fillText('STOP/FEUX ►', Math.floor(W*0.51), 12);
+
+  // Couloir entre lignes
+  const corrL = lineState.lastLeftX  || Math.floor(W*0.20);
+  const corrR = lineState.lastRightX || Math.floor(W*0.80);
+  const cy0=Math.floor(H*0.20), cy1=Math.floor(H*0.58);
+  ctx.strokeStyle = 'rgba(255,150,0,0.12)';
+  ctx.setLineDash([3,7]);
+  ctx.strokeRect(corrL, cy0, corrR-corrL, cy1-cy0);
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(255,150,0,0.35)';
+  ctx.font = '9px Share Tech Mono';
+  ctx.fillText('COULOIR', corrL+4, cy0+11);
+
+  // Axe central
+  ctx.strokeStyle = 'rgba(255,204,0,0.15)';
+  ctx.setLineDash([5,10]);
+  ctx.beginPath(); ctx.moveTo(W/2,H*0.50); ctx.lineTo(W/2,H); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Icône véhicule (triangle bas)
+  const vx=W/2, vy=H-16;
+  ctx.fillStyle = 'rgba(0,212,255,0.55)';
+  ctx.beginPath(); ctx.moveTo(vx,vy-10); ctx.lineTo(vx-9,vy); ctx.lineTo(vx+9,vy); ctx.closePath(); ctx.fill();
+}
+
+// ════════════════════════════════════════════════════════════════
+// FILTRES VISUELS
+// ════════════════════════════════════════════════════════════════
+function applyEdgeFilter(ctx, imageData, W, H) {
+  const src=imageData.data;
+  const out=ctx.createImageData(W,H);
+  const d=out.data;
+  for(let y=1;y<H-1;y++) for(let x=1;x<W-1;x++){
+    const i=(y*W+x)*4;
+    const gx=(-src[i-W*4-4]+src[i-W*4+4]-2*src[i-4]+2*src[i+4]-src[i+W*4-4]+src[i+W*4+4])/8;
+    const gy=(-src[i-W*4-4]-2*src[i-W*4]-src[i-W*4+4]+src[i+W*4-4]+2*src[i+W*4]+src[i+W*4+4])/8;
+    const mag=Math.min(255,Math.sqrt(gx*gx+gy*gy)*2.5);
+    d[i]=mag; d[i+1]=mag*0.6; d[i+2]=mag*1.2; d[i+3]=255;
+  }
+  ctx.putImageData(out,0,0);
+}
+
+function applyColorFilter(ctx, imageData, W, H) {
+  const d=imageData.data;
+  for(let i=0;i<d.length;i+=4){
+    const gray=(d[i]+d[i+1]+d[i+2])/3;
+    const {h,s,v}=rgbToHsv(d[i],d[i+1],d[i+2]);
+    const boost=Math.min(1,s*2.5);
+    d[i]  =Math.min(255,gray*(1-boost)+d[i]*boost*1.5);
+    d[i+1]=Math.min(255,gray*(1-boost)+d[i+1]*boost*1.5);
+    d[i+2]=Math.min(255,gray*(1-boost)+d[i+2]*boost*1.5);
+  }
+  ctx.putImageData(imageData,0,0);
+}
+
+// ════════════════════════════════════════════════════════════════
+// HELPERS PANNEAUX / BADGES
+// ════════════════════════════════════════════════════════════════
 function updateSignPanel(type, conf, cm) {
-  const display = document.getElementById('signDisplay');
-  const badge   = document.getElementById('signBadge');
-
-  if (type === 'stop') {
-    display.innerHTML = `
-      <div class="sign-icon-big">🛑</div>
-      <div class="sign-info">
-        <div class="sign-name">PANNEAU STOP</div>
-        <div class="sign-action">Rouge octogonal détecté</div>
-      </div>
+  const display=document.getElementById('signDisplay');
+  const badge=document.getElementById('signBadge');
+  if(type==='stop'){
+    display.innerHTML=`<div class="sign-icon-big">🛑</div>
+      <div class="sign-info"><div class="sign-name">PANNEAU STOP</div>
+      <div class="sign-action">Rouge octogonal détecté</div></div>
       <div class="sign-conf" style="color:var(--danger)">${(conf*100).toFixed(0)}%</div>`;
-    badge.textContent = 'STOP!';
-    badge.style.color = 'var(--danger)';
+    badge.textContent='STOP!'; badge.style.color='var(--danger)';
     document.getElementById('badge-stop').classList.add('danger');
-  } else if (type === 'light' && cm) {
-    display.innerHTML = `
-      <div class="sign-icon-big">${cm.label.split(' ')[0]}</div>
-      <div class="sign-info">
-        <div class="sign-name">${cm.label.substring(3)}</div>
-        <div class="sign-action">${cm.action}</div>
-      </div>
+  } else if(type==='light'&&cm){
+    display.innerHTML=`<div class="sign-icon-big">${cm.label.split(' ')[0]}</div>
+      <div class="sign-info"><div class="sign-name">${cm.label.substring(3)}</div>
+      <div class="sign-action">${cm.action}</div></div>
       <div class="sign-conf" style="color:${cm.hex}">${(conf*100).toFixed(0)}%</div>`;
-    badge.textContent = cm.label.substring(3, 9).trim();
-    badge.style.color = cm.hex;
+    badge.textContent=cm.label.substring(3,9).trim();
+    badge.style.color=cm.hex;
   }
 }
 
 function clearSignPanel(type) {
-  const now = Date.now();
-  if (type === 'stop' && now - lastStopTime > STOP_COOLDOWN) {
+  const now=Date.now();
+  if(type==='stop'&&now-lastStopTime>STOP_COOLDOWN)
     document.getElementById('badge-stop').classList.remove('danger');
+  if(type==='light'&&now-lastLightTime>LIGHT_COOLDOWN*4){
+    lastLightState=null;
+    const sb=document.getElementById('signBadge');
+    if(sb){sb.textContent='ACTIF';sb.style.color='';}
   }
-  if (type === 'light' && now - lastLightTime > LIGHT_COOLDOWN * 4) {
-    lastLightState = null;
-    document.getElementById('signBadge').textContent = 'ACTIF';
-    document.getElementById('signBadge').style.color = '';
-  }
 }
-
-function drawBBox(ctx, x, y, w, h, color, label, conf) {
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
-  ctx.shadowColor = color;
-  ctx.shadowBlur = 6;
-  ctx.strokeRect(x, y, w, h);
-  ctx.shadowBlur = 0;
-
-  // Corner marks
-  const cs = 10;
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  [[x,y],[x+w,y],[x,y+h],[x+w,y+h]].forEach(([cx,cy]) => {
-    const dx = cx === x ? 1 : -1;
-    const dy = cy === y ? 1 : -1;
-    ctx.moveTo(cx, cy + dy*cs);
-    ctx.lineTo(cx, cy);
-    ctx.lineTo(cx + dx*cs, cy);
-  });
-  ctx.stroke();
-
-  // Label
-  ctx.fillStyle = color + 'CC';
-  ctx.fillRect(x, y - 22, label.length * 7 + 60, 20);
-  ctx.fillStyle = '#000';
-  ctx.font = 'bold 11px Share Tech Mono';
-  ctx.fillText(`${label} ${(conf*100).toFixed(0)}%`, x + 4, y - 7);
-}
-
-function drawGuide(ctx, W, H) {
-  // ── 1. Ligne de séparation 50% (limite basse détection lignes) ─
-  ctx.strokeStyle = 'rgba(0,212,255,0.18)';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([6, 10]);
-  ctx.beginPath();
-  ctx.moveTo(0, H * 0.50);
-  ctx.lineTo(W, H * 0.50);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // Label zone lignes
-  ctx.fillStyle = 'rgba(0,212,255,0.45)';
-  ctx.font = '9px Share Tech Mono';
-  ctx.fillText('▼ ZONE DÉTECTION LIGNES', 4, H * 0.50 + 12);
-
-  // ── 2. Zone STOP + FEUX (moitié droite) ──────────────────
-  ctx.strokeStyle = 'rgba(255,45,85,0.10)';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([4, 8]);
-  ctx.strokeRect(Math.floor(W * 0.50), 0, Math.floor(W * 0.50), H * 0.65);
-  ctx.setLineDash([]);
-  ctx.fillStyle = 'rgba(255,45,85,0.35)';
-  ctx.font = '9px Share Tech Mono';
-  ctx.fillText('STOP/FEUX ►', Math.floor(W * 0.51), 12);
-
-  // ── 3. Couloir de circulation entre les lignes ────────────
-  const leftBound  = lineState.lastLeftX  || Math.floor(W * 0.20);
-  const rightBound = lineState.lastRightX || Math.floor(W * 0.80);
-  const corridorY0 = Math.floor(H * 0.25);
-  const corridorY1 = Math.floor(H * 0.58);
-
-  ctx.strokeStyle = 'rgba(255,150,0,0.15)';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([3, 7]);
-  ctx.strokeRect(leftBound, corridorY0, rightBound - leftBound, corridorY1 - corridorY0);
-  ctx.setLineDash([]);
-  ctx.fillStyle = 'rgba(255,150,0,0.35)';
-  ctx.font = '9px Share Tech Mono';
-  ctx.fillText('COULOIR', leftBound + 4, corridorY0 + 12);
-
-  // ── 4. Ligne centrale de référence (axe de route idéal) ──
-  ctx.strokeStyle = 'rgba(255,204,0,0.18)';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([5, 10]);
-  ctx.beginPath();
-  ctx.moveTo(W / 2, H * 0.50);
-  ctx.lineTo(W / 2, H);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // ── 5. Horizon virtuel ────────────────────────────────────
-  ctx.strokeStyle = 'rgba(0,212,255,0.08)';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, H * 0.45);
-  ctx.lineTo(W, H * 0.45);
-  ctx.stroke();
-
-  // ── 6. Indicateur position véhicule (triangle bas) ───────
-  const vehX = W / 2;
-  const vehY = H - 18;
-  ctx.fillStyle = 'rgba(0,212,255,0.5)';
-  ctx.beginPath();
-  ctx.moveTo(vehX, vehY - 10);
-  ctx.lineTo(vehX - 8, vehY);
-  ctx.lineTo(vehX + 8, vehY);
-  ctx.closePath();
-  ctx.fill();
-}
-
-function applyEdgeFilter(ctx, imageData, W, H) {
-  const data = imageData.data;
-  const out = ctx.createImageData(W, H);
-  for (let y = 1; y < H-1; y++) {
-    for (let x = 1; x < W-1; x++) {
-      const idx = (y*W+x)*4;
-      const gx = -data[((y-1)*W+(x-1))*4] + data[((y-1)*W+(x+1))*4]
-                 -2*data[(y*W+(x-1))*4] + 2*data[(y*W+(x+1))*4]
-                 -data[((y+1)*W+(x-1))*4] + data[((y+1)*W+(x+1))*4];
-      const gy = -data[((y-1)*W+(x-1))*4] - 2*data[((y-1)*W+x)*4] - data[((y-1)*W+(x+1))*4]
-                 +data[((y+1)*W+(x-1))*4] + 2*data[((y+1)*W+x)*4] + data[((y+1)*W+(x+1))*4];
-      const mag = Math.min(255, Math.sqrt(gx*gx + gy*gy));
-      out.data[idx] = 0;
-      out.data[idx+1] = mag;
-      out.data[idx+2] = mag * 0.6;
-      out.data[idx+3] = 255;
-    }
-  }
-  ctx.putImageData(out, 0, 0);
-}
-
-function applyColorFilter(ctx, imageData, W, H) {
-  const data = imageData.data;
-  const out = ctx.createImageData(W, H);
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i], g = data[i+1], b = data[i+2];
-    // Saturate
-    const avg = (r+g+b)/3;
-    out.data[i]   = Math.min(255, avg + (r-avg)*2.5);
-    out.data[i+1] = Math.min(255, avg + (g-avg)*2.5);
-    out.data[i+2] = Math.min(255, avg + (b-avg)*2.5);
-    out.data[i+3] = 255;
-  }
-  ctx.putImageData(out, 0, 0);
-}
-
 // ============================================================
 // MOTOR CONTROL
 // ============================================================
@@ -3125,11 +3058,13 @@ document.addEventListener('keyup', e => {
 // ============================================================
 // INIT
 // ============================================================
-log('🚀 Système ESP32U initialisé', 'success');
+log('🚀 Système ESP32U V4 — IA initialisé', 'success');
+// Lancer le chargement des modèles IA dès le démarrage
+loadAIModels();
 log('⌨ Utilisez les flèches clavier pour piloter', 'info');
 log('📡 En attente connexion BLE...', 'info');
 log('📷 Cliquez sur CAMÉRA pour sélectionner la source vidéo', 'info');
-log('👁 Vision: détection STOP + feux + obstacles par analyse pixel', 'info');
+log('👁 Vision: COCO-SSD (TF.js GPU) + HSV pixel — chargement modèles...', 'info');
 
 // Color button initial style
 document.querySelector('.color-btn.selected').style.borderColor = '#ffffff';
