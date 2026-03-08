@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ESP32U — Système Voiture Autonome</title>
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@300;400;500;600;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+<!-- WebcamJS — gestion caméra multi-plateforme -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/webcamjs/1.0.26/webcam.min.js"></script>
 <style>
   :root {
     --bg: #050810;
@@ -977,6 +979,153 @@
     from { box-shadow: 0 0 30px rgba(255,45,85,0.4), inset 0 0 20px rgba(255,45,85,0.1); }
     to { box-shadow: 0 0 50px rgba(255,45,85,0.7), inset 0 0 30px rgba(255,45,85,0.2); }
   }
+
+  /* ── CAMERA PICKER BUTTON ── */
+  .cam-header-btn {
+    position: relative;
+    font-family: 'Orbitron', monospace;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    padding: 8px 16px;
+    border: 1px solid var(--accent2);
+    background: transparent;
+    color: var(--accent2);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    white-space: nowrap;
+  }
+  .cam-header-btn:hover { background: rgba(0,255,136,0.1); box-shadow: var(--glow2); }
+  .cam-header-btn.active {
+    background: rgba(0,255,136,0.15);
+    box-shadow: var(--glow2);
+    border-color: var(--accent2);
+  }
+  .cam-header-btn.stopping {
+    border-color: var(--danger);
+    color: var(--danger);
+    background: rgba(255,45,85,0.08);
+  }
+
+  /* Camera source dropdown */
+  .cam-dropdown {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    min-width: 230px;
+    z-index: 200;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+    display: none;
+    animation: dropDown 0.15s ease;
+  }
+  .cam-dropdown.open { display: block; }
+
+  @keyframes dropDown {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .cam-dropdown-header {
+    padding: 8px 12px;
+    font-family: 'Orbitron', monospace;
+    font-size: 0.55rem;
+    letter-spacing: 0.2em;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    background: rgba(0,0,0,0.2);
+    text-transform: uppercase;
+  }
+
+  .cam-source-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    cursor: pointer;
+    transition: background 0.15s;
+    border-bottom: 1px solid rgba(26,37,64,0.5);
+  }
+  .cam-source-option:last-child { border-bottom: none; }
+  .cam-source-option:hover { background: rgba(0,255,136,0.07); }
+  .cam-source-option:active { background: rgba(0,255,136,0.14); }
+
+  .cam-source-icon {
+    font-size: 1.2rem;
+    width: 28px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+  .cam-source-info { flex: 1; }
+  .cam-source-name {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.68rem;
+    color: var(--text);
+    letter-spacing: 0.05em;
+  }
+  .cam-source-desc {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.55rem;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
+  .cam-source-badge {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.52rem;
+    padding: 2px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--accent2);
+    color: var(--accent2);
+    background: rgba(0,255,136,0.06);
+    flex-shrink: 0;
+  }
+
+  /* Divider in dropdown */
+  .cam-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 0;
+  }
+
+  /* Device list items */
+  .cam-device-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px 8px 20px;
+    cursor: pointer;
+    transition: background 0.15s;
+    border-bottom: 1px solid rgba(26,37,64,0.3);
+  }
+  .cam-device-item:last-child { border-bottom: none; }
+  .cam-device-item:hover { background: rgba(0,212,255,0.07); }
+  .cam-device-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cam-device-item.selected .cam-device-label { color: var(--accent); }
+
+  /* Loading spinner inside dropdown */
+  .cam-loading {
+    padding: 12px 14px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    text-align: center;
+    letter-spacing: 0.1em;
+  }
 </style>
 </head>
 <body>
@@ -1010,6 +1159,70 @@
       <div class="status-dot" id="camStatusDot"></div>
       <span id="camStatusText" style="font-family:'Share Tech Mono',monospace;font-size:0.65rem;letter-spacing:0.1em;">CAM: INACTIVE</span>
     </div>
+
+    <!-- ── CAMERA PICKER ── -->
+    <div style="position:relative;" id="camPickerWrapper">
+      <button class="cam-header-btn" id="camHeaderBtn" onclick="toggleCamDropdown(event)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+          <circle cx="12" cy="13" r="4"/>
+        </svg>
+        <span id="camHeaderLabel">CAMÉRA</span>
+        <svg id="camChevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+
+      <!-- Dropdown sources -->
+      <div class="cam-dropdown" id="camDropdown">
+        <div class="cam-dropdown-header">▸ SÉLECTIONNER SOURCE</div>
+
+        <div class="cam-source-option" onclick="startCameraSource('pc')">
+          <div class="cam-source-icon">🖥️</div>
+          <div class="cam-source-info">
+            <div class="cam-source-name">WEBCAM PC</div>
+            <div class="cam-source-desc">Caméra intégrée ou USB</div>
+          </div>
+          <div class="cam-source-badge">USER</div>
+        </div>
+
+        <div class="cam-source-option" onclick="startCameraSource('front')">
+          <div class="cam-source-icon">🤳</div>
+          <div class="cam-source-info">
+            <div class="cam-source-name">SMARTPHONE AVANT</div>
+            <div class="cam-source-desc">Caméra frontale (selfie)</div>
+          </div>
+          <div class="cam-source-badge">FRONT</div>
+        </div>
+
+        <div class="cam-source-option" onclick="startCameraSource('rear')">
+          <div class="cam-source-icon">📷</div>
+          <div class="cam-source-info">
+            <div class="cam-source-name">SMARTPHONE ARRIÈRE</div>
+            <div class="cam-source-desc">Caméra principale (HD)</div>
+          </div>
+          <div class="cam-source-badge">REAR</div>
+        </div>
+
+        <div class="cam-divider"></div>
+
+        <!-- Liste des périphériques détectés -->
+        <div class="cam-dropdown-header" style="border-top:none;">▸ PÉRIPHÉRIQUES DÉTECTÉS</div>
+        <div id="camDeviceList">
+          <div class="cam-loading" id="camDeviceLoading">⟳ Énumération des caméras...</div>
+        </div>
+
+        <div class="cam-divider"></div>
+
+        <!-- Arrêt -->
+        <div class="cam-source-option" onclick="stopCameraFromDropdown()" id="camStopOption" style="display:none;">
+          <div class="cam-source-icon">⏹</div>
+          <div class="cam-source-info">
+            <div class="cam-source-name" style="color:var(--danger)">ARRÊTER CAMÉRA</div>
+            <div class="cam-source-desc">Libérer le flux vidéo</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <button class="ble-btn" id="bleBtn" onclick="toggleBLE()">⬡ CONNECTER BLE</button>
   </div>
 </header>
@@ -1176,9 +1389,13 @@
     </div>
 
     <div style="padding:10px 14px;">
-      <button class="cam-btn" id="camBtn" onclick="toggleCamera()">
-        <span>📷</span> ACTIVER CAMÉRA
-      </button>
+      <!-- Camera source info bar -->
+      <div id="camSourceBar" style="display:none;align-items:center;gap:10px;padding:7px 12px;border:1px solid var(--border);border-radius:4px;background:rgba(0,255,136,0.05);margin-bottom:8px;">
+        <div style="width:8px;height:8px;border-radius:50%;background:var(--accent2);box-shadow:0 0 8px var(--accent2);animation:pulse 2s infinite;flex-shrink:0;"></div>
+        <span id="camSourceName" style="font-family:'Share Tech Mono',monospace;font-size:0.62rem;color:var(--accent2);flex:1;"></span>
+        <span id="camResInfo" style="font-family:'Share Tech Mono',monospace;font-size:0.58rem;color:var(--text-dim);"></span>
+        <button onclick="stopCamera()" style="font-family:'Orbitron',monospace;font-size:0.55rem;padding:3px 10px;border:1px solid var(--danger);background:rgba(255,45,85,0.08);color:var(--danger);border-radius:3px;cursor:pointer;letter-spacing:0.1em;">⏹ STOP</button>
+      </div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;">
         <div>
@@ -1338,7 +1555,7 @@
 // ============================================================
 const state = {
   ble: { connected: false, device: null, characteristic: null },
-  camera: { active: false, stream: null },
+  camera: { active: false, stream: null, deviceId: null, sourceName: '' },
   motor: { direction: 'S', speed: 150, safeDist: 30 },
   auto: false,
   viewMode: 'normal',
@@ -1497,45 +1714,179 @@ async function sendBLE(cmd) {
 }
 
 // ============================================================
-// CAMERA
+// CAMERA PICKER — DROPDOWN
 // ============================================================
-async function toggleCamera() {
-  if (state.camera.active) {
-    stopCamera();
+let camDropdownOpen = false;
+
+function toggleCamDropdown(e) {
+  e.stopPropagation();
+  camDropdownOpen = !camDropdownOpen;
+  const dd = document.getElementById('camDropdown');
+  const chevron = document.getElementById('camChevron');
+  if (camDropdownOpen) {
+    dd.classList.add('open');
+    chevron.style.transform = 'rotate(180deg)';
+    enumerateCameras();
   } else {
-    await startCamera();
+    dd.classList.remove('open');
+    chevron.style.transform = '';
   }
 }
 
-async function startCamera() {
+// Close dropdown on outside click
+document.addEventListener('click', (e) => {
+  if (!document.getElementById('camPickerWrapper').contains(e.target)) {
+    closeCamDropdown();
+  }
+});
+
+function closeCamDropdown() {
+  camDropdownOpen = false;
+  document.getElementById('camDropdown').classList.remove('open');
+  const chevron = document.getElementById('camChevron');
+  if (chevron) chevron.style.transform = '';
+}
+
+// Enumerate all available video input devices
+async function enumerateCameras() {
+  const listEl = document.getElementById('camDeviceList');
+  const loadingEl = document.getElementById('camDeviceLoading');
+
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: 1280, height: 720 }
-    });
+    // Request permission first so labels are populated
+    let tempStream = null;
+    try {
+      tempStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    } catch(_) {}
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videoDevices = devices.filter(d => d.kind === 'videoinput');
+
+    if (tempStream) tempStream.getTracks().forEach(t => t.stop());
+
+    if (videoDevices.length === 0) {
+      listEl.innerHTML = '<div class="cam-loading">Aucune caméra trouvée</div>';
+      return;
+    }
+
+    listEl.innerHTML = videoDevices.map((dev, i) => {
+      const label = dev.label || `Caméra ${i + 1}`;
+      const isCurrent = state.camera.deviceId === dev.deviceId;
+      return `<div class="cam-device-item ${isCurrent ? 'selected' : ''}"
+                   onclick="startCameraByDeviceId('${dev.deviceId}','${label.replace(/'/g,'')}')"
+                   title="${label}">
+        <span style="font-size:0.85rem;">📹</span>
+        <span class="cam-device-label">${label}</span>
+        ${isCurrent ? '<span style="color:var(--accent);font-size:0.6rem;font-family:Share Tech Mono,monospace;">● ACT.</span>' : ''}
+      </div>`;
+    }).join('');
+  } catch(err) {
+    listEl.innerHTML = `<div class="cam-loading" style="color:var(--danger);">Erreur: ${err.message}</div>`;
+  }
+}
+
+// ============================================================
+// CAMERA — START / STOP (MediaDevices API robuste)
+// ============================================================
+async function toggleCamera() {
+  if (state.camera.active) stopCamera();
+  else toggleCamDropdown({ stopPropagation: () => {} });
+}
+
+async function startCameraSource(source) {
+  closeCamDropdown();
+  let constraints = {};
+  let sourceName = '';
+
+  switch(source) {
+    case 'pc':
+      constraints = { video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }, audio: false };
+      sourceName = '🖥️ WEBCAM PC';
+      break;
+    case 'front':
+      constraints = { video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: { exact: 'user' } }, audio: false };
+      sourceName = '🤳 CAM. AVANT';
+      break;
+    case 'rear':
+      constraints = { video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: { exact: 'environment' } }, audio: false };
+      sourceName = '📷 CAM. ARRIÈRE';
+      break;
+  }
+
+  await startCameraWithConstraints(constraints, sourceName);
+}
+
+async function startCameraByDeviceId(deviceId, label) {
+  closeCamDropdown();
+  const constraints = {
+    video: { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false
+  };
+  state.camera.deviceId = deviceId;
+  await startCameraWithConstraints(constraints, `📹 ${label}`);
+}
+
+async function startCameraWithConstraints(constraints, sourceName) {
+  // Stop any existing stream first
+  if (state.camera.active) stopCamera();
+
+  // Update button to loading state
+  const btn = document.getElementById('camHeaderBtn');
+  const label = document.getElementById('camHeaderLabel');
+  label.textContent = '⟳ INIT...';
+  btn.style.opacity = '0.7';
+  btn.disabled = true;
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
     const video = document.getElementById('videoFeed');
     video.srcObject = stream;
     state.camera.stream = stream;
     state.camera.active = true;
+    state.camera.sourceName = sourceName;
 
-    document.getElementById('camBtn').textContent = '⏹ ARRÊTER CAMÉRA';
-    document.getElementById('camBtn').classList.add('active');
-    document.getElementById('camStatusDot').className = 'status-dot connected';
-    document.getElementById('camStatusText').textContent = 'CAM: ACTIVE';
-    document.getElementById('recBadge').style.display = 'flex';
-    document.getElementById('sd-cam').style.background = 'var(--accent2)';
-    document.getElementById('sd-cv').style.background = 'var(--accent2)';
-
-    log('📷 Caméra activée', 'success');
+    // Ensure video plays
+    video.play().catch(() => {});
 
     video.onloadedmetadata = () => {
+      const W = video.videoWidth;
+      const H = video.videoHeight;
       const canvas = document.getElementById('overlayCanvas');
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      document.getElementById('resolutionBadge').textContent = `${video.videoWidth}×${video.videoHeight}`;
+      canvas.width = W;
+      canvas.height = H;
+      document.getElementById('resolutionBadge').textContent = `${W}×${H}`;
+      document.getElementById('camResInfo').textContent = `${W}×${H}`;
       startVision();
+      log(`📷 ${sourceName} démarrée — ${W}×${H}`, 'success');
     };
-  } catch(e) {
-    log(`❌ Caméra: ${e.message}`, 'danger');
+
+    // Update UI
+    updateCameraUI(true, sourceName);
+
+  } catch(err) {
+    label.textContent = 'CAMÉRA';
+    btn.style.opacity = '';
+    btn.disabled = false;
+
+    // Fallback: if exact facingMode fails, retry without exact
+    if (err.name === 'OverconstrainedError' && constraints.video.facingMode?.exact) {
+      log(`⚠ Caméra exacte indisponible, tentative fallback...`, 'warning');
+      const fallback = { ...constraints, video: { ...constraints.video, facingMode: constraints.video.facingMode.exact } };
+      delete fallback.video.facingMode;
+      await startCameraWithConstraints(fallback, sourceName + ' (fallback)');
+      return;
+    }
+
+    log(`❌ Caméra: ${err.name} — ${err.message}`, 'danger');
+
+    // Detailed user guidance
+    if (err.name === 'NotAllowedError') {
+      log('💡 Vérifiez les permissions caméra dans votre navigateur', 'warning');
+    } else if (err.name === 'NotFoundError') {
+      log('💡 Aucune caméra trouvée. Vérifiez la connexion du périphérique', 'warning');
+    } else if (err.name === 'NotReadableError') {
+      log('💡 Caméra déjà utilisée par une autre application', 'warning');
+    }
   }
 }
 
@@ -1544,15 +1895,62 @@ function stopCamera() {
     state.camera.stream.getTracks().forEach(t => t.stop());
     state.camera.stream = null;
   }
+  if (visionLoop) { cancelAnimationFrame(visionLoop); visionLoop = null; }
+
+  // Clear canvas
+  const canvas = document.getElementById('overlayCanvas');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
   state.camera.active = false;
-  document.getElementById('camBtn').textContent = '📷 ACTIVER CAMÉRA';
-  document.getElementById('camBtn').classList.remove('active');
-  document.getElementById('camStatusDot').className = 'status-dot';
-  document.getElementById('camStatusText').textContent = 'CAM: INACTIVE';
-  document.getElementById('recBadge').style.display = 'none';
-  document.getElementById('sd-cam').style.background = 'var(--text-dim)';
-  document.getElementById('sd-cv').style.background = 'var(--text-dim)';
+  state.camera.deviceId = null;
+  updateCameraUI(false, '');
   log('📷 Caméra arrêtée', 'warning');
+}
+
+function stopCameraFromDropdown() {
+  closeCamDropdown();
+  stopCamera();
+}
+
+function updateCameraUI(active, sourceName) {
+  const btn = document.getElementById('camHeaderBtn');
+  const label = document.getElementById('camHeaderLabel');
+  const dot = document.getElementById('camStatusDot');
+  const txt = document.getElementById('camStatusText');
+  const sourceBar = document.getElementById('camSourceBar');
+  const sourceNameEl = document.getElementById('camSourceName');
+  const stopOption = document.getElementById('camStopOption');
+  const sdCam = document.getElementById('sd-cam');
+  const sdCv  = document.getElementById('sd-cv');
+  const recBadge = document.getElementById('recBadge');
+
+  btn.disabled = false;
+  btn.style.opacity = '';
+
+  if (active) {
+    btn.classList.add('active');
+    btn.classList.remove('stopping');
+    label.textContent = '● EN DIRECT';
+    dot.className = 'status-dot connected';
+    txt.textContent = 'CAM: ACTIVE';
+    sourceBar.style.display = 'flex';
+    sourceNameEl.textContent = sourceName;
+    stopOption.style.display = 'flex';
+    sdCam.style.background = 'var(--accent2)';
+    sdCv.style.background  = 'var(--accent2)';
+    recBadge.style.display = 'flex';
+  } else {
+    btn.classList.remove('active', 'stopping');
+    label.textContent = 'CAMÉRA';
+    dot.className = 'status-dot';
+    txt.textContent = 'CAM: INACTIVE';
+    sourceBar.style.display = 'none';
+    stopOption.style.display = 'none';
+    sdCam.style.background = 'var(--text-dim)';
+    sdCv.style.background  = 'var(--text-dim)';
+    recBadge.style.display = 'none';
+  }
 }
 
 // ============================================================
@@ -2071,10 +2469,19 @@ document.addEventListener('keyup', e => {
 log('🚀 Système ESP32U initialisé', 'success');
 log('⌨ Utilisez les flèches clavier pour piloter', 'info');
 log('📡 En attente connexion BLE...', 'info');
+log('📷 Cliquez sur CAMÉRA pour sélectionner la source vidéo', 'info');
 
 // Color button initial style
 document.querySelector('.color-btn.selected').style.borderColor = '#ffffff';
 document.querySelector('.color-btn.selected').style.color = '#ffffff';
+
+// Listen for device changes (plug/unplug camera)
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+  navigator.mediaDevices.addEventListener('devicechange', () => {
+    log('🔌 Changement de périphérique détecté', 'info');
+    if (camDropdownOpen) enumerateCameras();
+  });
+}
 
 // Simulate periodic telemetry
 setInterval(() => {
