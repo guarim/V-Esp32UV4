@@ -1,0 +1,2877 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32U — Système Voiture Autonome</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@300;400;500;600;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+<!-- WebcamJS — gestion caméra multi-plateforme -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/webcamjs/1.0.26/webcam.min.js"></script>
+<style>
+  :root {
+    --bg: #050810;
+    --surface: #0a0f1e;
+    --surface2: #0f1730;
+    --border: #1a2540;
+    --accent: #00d4ff;
+    --accent2: #00ff88;
+    --accent3: #ff6b35;
+    --accent4: #ffcc00;
+    --danger: #ff2d55;
+    --text: #c8d8f0;
+    --text-dim: #4a6080;
+    --glow: 0 0 20px rgba(0,212,255,0.3);
+    --glow2: 0 0 20px rgba(0,255,136,0.3);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Rajdhani', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+    background-image:
+      radial-gradient(ellipse at 20% 0%, rgba(0,212,255,0.05) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 100%, rgba(0,255,136,0.04) 0%, transparent 50%);
+  }
+
+  /* SCANLINE OVERLAY */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.03) 2px,
+      rgba(0,0,0,0.03) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* HEADER */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 28px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(10,15,30,0.95);
+    backdrop-filter: blur(10px);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .logo-icon {
+    width: 40px;
+    height: 40px;
+    position: relative;
+  }
+
+  .logo-icon svg { width: 40px; height: 40px; }
+
+  .logo-text {
+    font-family: 'Orbitron', monospace;
+    font-size: 1.1rem;
+    font-weight: 900;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+    text-shadow: var(--glow);
+  }
+
+  .logo-sub {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    letter-spacing: 0.2em;
+    margin-top: -4px;
+  }
+
+  .header-status {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+  }
+
+  .status-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    transition: all 0.3s;
+  }
+
+  .status-dot.connected { background: var(--accent2); box-shadow: 0 0 8px var(--accent2); animation: pulse 2s infinite; }
+  .status-dot.error { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .ble-btn {
+    font-family: 'Orbitron', monospace;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    padding: 8px 18px;
+    border: 1px solid var(--accent);
+    background: transparent;
+    color: var(--accent);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-transform: uppercase;
+  }
+
+  .ble-btn:hover { background: rgba(0,212,255,0.1); box-shadow: var(--glow); }
+  .ble-btn.connected { border-color: var(--danger); color: var(--danger); }
+
+  /* MAIN LAYOUT */
+  .main {
+    display: grid;
+    grid-template-columns: 280px 1fr 280px;
+    grid-template-rows: auto auto;
+    gap: 12px;
+    padding: 12px;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+
+  /* PANELS */
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .panel::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    opacity: 0.6;
+  }
+
+  .panel-green::before { background: linear-gradient(90deg, transparent, var(--accent2), transparent); }
+  .panel-orange::before { background: linear-gradient(90deg, transparent, var(--accent3), transparent); }
+  .panel-yellow::before { background: linear-gradient(90deg, transparent, var(--accent4), transparent); }
+
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(0,0,0,0.2);
+  }
+
+  .panel-title {
+    font-family: 'Orbitron', monospace;
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+
+  .panel-green .panel-title { color: var(--accent2); }
+  .panel-orange .panel-title { color: var(--accent3); }
+  .panel-yellow .panel-title { color: var(--accent4); }
+
+  .panel-badge {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.6rem;
+    padding: 2px 8px;
+    border-radius: 3px;
+    background: rgba(0,212,255,0.1);
+    border: 1px solid rgba(0,212,255,0.2);
+    color: var(--accent);
+  }
+
+  .panel-content { padding: 12px; }
+
+  /* VIDEO PANEL */
+  .video-panel {
+    grid-column: 2;
+    grid-row: 1 / 3;
+  }
+
+  .video-container {
+    position: relative;
+    background: #000;
+    aspect-ratio: 4/3;
+    overflow: hidden;
+  }
+
+  #videoFeed {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  #overlayCanvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  .video-hud {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .hud-corner {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    border-color: var(--accent);
+    border-style: solid;
+    opacity: 0.6;
+  }
+
+  .hud-tl { top: 8px; left: 8px; border-width: 2px 0 0 2px; }
+  .hud-tr { top: 8px; right: 8px; border-width: 2px 2px 0 0; }
+  .hud-bl { bottom: 8px; left: 8px; border-width: 0 0 2px 2px; }
+  .hud-br { bottom: 8px; right: 8px; border-width: 0 2px 2px 0; }
+
+  .hud-scan {
+    position: absolute;
+    left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    opacity: 0.4;
+    animation: scan 3s linear infinite;
+  }
+
+  @keyframes scan {
+    0% { top: 0%; }
+    100% { top: 100%; }
+  }
+
+  .video-overlay-info {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    right: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+  }
+
+  .vid-stat {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--accent);
+    text-shadow: 0 0 10px var(--accent);
+    background: rgba(5,8,16,0.7);
+    padding: 3px 8px;
+    border-radius: 3px;
+    backdrop-filter: blur(4px);
+  }
+
+  .vid-recording {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--danger);
+    background: rgba(5,8,16,0.7);
+    padding: 3px 8px;
+    border-radius: 3px;
+  }
+
+  .rec-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--danger);
+    animation: pulse 1s infinite;
+  }
+
+  .cam-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: 100%;
+    padding: 10px;
+    font-family: 'Orbitron', monospace;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    border: 1px solid var(--accent2);
+    background: rgba(0,255,136,0.08);
+    color: var(--accent2);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-top: 8px;
+  }
+
+  .cam-btn:hover { background: rgba(0,255,136,0.15); box-shadow: var(--glow2); }
+  .cam-btn.active { background: rgba(0,255,136,0.2); box-shadow: var(--glow2); }
+
+  /* DETECTION BADGES */
+  .detection-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 4px;
+  }
+
+  .det-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.62rem;
+    transition: all 0.3s;
+    cursor: default;
+  }
+
+  .det-badge.active {
+    border-color: var(--accent2);
+    background: rgba(0,255,136,0.08);
+    color: var(--accent2);
+  }
+
+  .det-badge.warning {
+    border-color: var(--accent4);
+    background: rgba(255,204,0,0.08);
+    color: var(--accent4);
+  }
+
+  .det-badge.danger {
+    border-color: var(--danger);
+    background: rgba(255,45,85,0.1);
+    color: var(--danger);
+    animation: flash 0.5s infinite;
+  }
+
+  @keyframes flash {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  .det-icon { font-size: 1rem; }
+
+  /* COLOR SELECTOR */
+  .color-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+  }
+
+  .color-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 4px;
+    border-radius: 4px;
+    border: 2px solid transparent;
+    cursor: pointer;
+    transition: all 0.2s;
+    background: rgba(0,0,0,0.3);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.55rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+
+  .color-dot {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.2);
+  }
+
+  .color-btn.selected {
+    background: rgba(255,255,255,0.05);
+    color: var(--text);
+  }
+
+  .color-btn:hover { background: rgba(255,255,255,0.08); }
+
+  /* MOTOR CONTROL */
+  .dpad {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-rows: repeat(3, 1fr);
+    gap: 6px;
+    aspect-ratio: 1;
+    max-width: 180px;
+    margin: 0 auto;
+  }
+
+  .dpad-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    cursor: pointer;
+    transition: all 0.15s;
+    font-size: 1.2rem;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+  }
+
+  .dpad-btn:hover { border-color: var(--accent); background: rgba(0,212,255,0.1); }
+  .dpad-btn:active, .dpad-btn.pressed {
+    background: rgba(0,212,255,0.2);
+    border-color: var(--accent);
+    box-shadow: inset 0 0 15px rgba(0,212,255,0.2);
+    transform: scale(0.95);
+  }
+
+  .dpad-btn.center {
+    background: rgba(255,45,85,0.1);
+    border-color: rgba(255,45,85,0.4);
+    color: var(--danger);
+    font-size: 0.5rem;
+    font-family: 'Orbitron', monospace;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  .dpad-btn.center:hover { background: rgba(255,45,85,0.2); border-color: var(--danger); }
+
+  .dpad-empty { visibility: hidden; }
+
+  /* SPEED CONTROL */
+  .speed-control { margin-top: 12px; }
+
+  .slider-label {
+    display: flex;
+    justify-content: space-between;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.62rem;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+
+  .slider-val { color: var(--accent); font-weight: bold; }
+
+  input[type="range"] {
+    width: 100%;
+    height: 4px;
+    -webkit-appearance: none;
+    background: var(--border);
+    border-radius: 2px;
+    outline: none;
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    box-shadow: 0 0 8px var(--accent);
+    transition: all 0.2s;
+  }
+
+  input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
+  }
+
+  /* STATS */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .stat-card {
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: rgba(0,0,0,0.2);
+  }
+
+  .stat-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.55rem;
+    color: var(--text-dim);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+
+  .stat-value {
+    font-family: 'Orbitron', monospace;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--accent);
+  }
+
+  .stat-unit {
+    font-size: 0.55rem;
+    color: var(--text-dim);
+    margin-left: 3px;
+  }
+
+  .stat-card.warning .stat-value { color: var(--accent4); }
+  .stat-card.danger .stat-value { color: var(--danger); }
+
+  /* DISTANCE BAR */
+  .distance-bar {
+    width: 100%;
+    height: 8px;
+    background: var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-top: 6px;
+  }
+
+  .distance-fill {
+    height: 100%;
+    border-radius: 4px;
+    background: linear-gradient(90deg, var(--danger), var(--accent4), var(--accent2));
+    transition: width 0.3s;
+  }
+
+  /* SIGN DETECTION */
+  .sign-display {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(0,0,0,0.2);
+    min-height: 60px;
+    margin-bottom: 8px;
+  }
+
+  .sign-icon-big {
+    font-size: 2rem;
+    width: 48px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  .sign-info { flex: 1; }
+
+  .sign-name {
+    font-family: 'Orbitron', monospace;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  .sign-action {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
+
+  .sign-conf {
+    font-family: 'Orbitron', monospace;
+    font-size: 0.8rem;
+    color: var(--accent2);
+    flex-shrink: 0;
+  }
+
+  /* EVENT LOG */
+  .event-log {
+    height: 160px;
+    overflow-y: auto;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.6rem;
+    line-height: 1.8;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .event-log::-webkit-scrollbar { width: 4px; }
+  .event-log::-webkit-scrollbar-track { background: transparent; }
+  .event-log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .log-entry {
+    display: flex;
+    gap: 8px;
+    padding: 2px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+  }
+
+  .log-time { color: var(--text-dim); flex-shrink: 0; }
+  .log-msg { color: var(--text); }
+  .log-entry.info .log-msg { color: var(--accent); }
+  .log-entry.success .log-msg { color: var(--accent2); }
+  .log-entry.warning .log-msg { color: var(--accent4); }
+  .log-entry.danger .log-msg { color: var(--danger); }
+
+  /* AUTONOMOUS MODE */
+  .auto-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(0,0,0,0.2);
+    cursor: pointer;
+    transition: all 0.3s;
+    margin-bottom: 8px;
+  }
+
+  .auto-toggle.active {
+    border-color: var(--accent2);
+    background: rgba(0,255,136,0.08);
+    box-shadow: var(--glow2);
+  }
+
+  .auto-toggle-label {
+    font-family: 'Orbitron', monospace;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+  }
+
+  .toggle-switch {
+    width: 40px;
+    height: 20px;
+    border-radius: 10px;
+    background: var(--border);
+    position: relative;
+    transition: all 0.3s;
+    flex-shrink: 0;
+  }
+
+  .toggle-switch::after {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    top: 2px;
+    left: 2px;
+    transition: all 0.3s;
+  }
+
+  .toggle-switch.on {
+    background: rgba(0,255,136,0.3);
+    border: 1px solid var(--accent2);
+  }
+
+  .toggle-switch.on::after {
+    left: 22px;
+    background: var(--accent2);
+    box-shadow: 0 0 6px var(--accent2);
+  }
+
+  /* SAFETY CONFIG */
+  .safety-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.62rem;
+  }
+
+  .safety-item:last-child { border-bottom: none; }
+  .safety-item-label { color: var(--text-dim); }
+  .safety-item-val { color: var(--accent); }
+
+  /* MINI TOGGLE */
+  .mini-toggle {
+    width: 30px;
+    height: 16px;
+    border-radius: 8px;
+    background: var(--border);
+    position: relative;
+    cursor: pointer;
+    transition: all 0.2s;
+    flex-shrink: 0;
+  }
+
+  .mini-toggle::after {
+    content: '';
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    top: 2px;
+    left: 2px;
+    transition: all 0.2s;
+  }
+
+  .mini-toggle.on { background: rgba(0,212,255,0.3); border: 1px solid var(--accent); }
+  .mini-toggle.on::after { left: 16px; background: var(--accent); }
+
+  /* EMERGENCY */
+  .emergency-btn {
+    width: 100%;
+    padding: 14px;
+    font-family: 'Orbitron', monospace;
+    font-size: 0.8rem;
+    font-weight: 900;
+    letter-spacing: 0.2em;
+    border: 2px solid var(--danger);
+    background: rgba(255,45,85,0.1);
+    color: var(--danger);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-transform: uppercase;
+    margin-top: 8px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .emergency-btn::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      45deg,
+      transparent,
+      transparent 10px,
+      rgba(255,45,85,0.05) 10px,
+      rgba(255,45,85,0.05) 20px
+    );
+  }
+
+  .emergency-btn:hover {
+    background: rgba(255,45,85,0.25);
+    box-shadow: 0 0 30px rgba(255,45,85,0.4);
+  }
+
+  .emergency-btn:active { transform: scale(0.98); }
+
+  /* NETWORK GRAPH */
+  .mini-chart {
+    width: 100%;
+    height: 40px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* MODE SELECTOR */
+  .mode-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 10px;
+  }
+
+  .mode-tab {
+    flex: 1;
+    padding: 6px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.58rem;
+    letter-spacing: 0.08em;
+    text-align: center;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+    color: var(--text-dim);
+    background: transparent;
+    text-transform: uppercase;
+  }
+
+  .mode-tab.active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(0,212,255,0.1);
+  }
+
+  /* BOTTOM STATUS BAR */
+  .status-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    border-top: 1px solid var(--border);
+    background: rgba(10,15,30,0.95);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    position: sticky;
+    bottom: 0;
+  }
+
+  .status-items { display: flex; gap: 20px; align-items: center; }
+
+  .s-item { display: flex; align-items: center; gap: 6px; }
+  .s-dot { width: 6px; height: 6px; border-radius: 50%; }
+
+  /* RESPONSIVE ADJUSTMENTS */
+  @media (max-width: 1200px) {
+    .main { grid-template-columns: 240px 1fr 240px; }
+  }
+
+  @media (max-width: 900px) {
+    .main {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto;
+    }
+    .video-panel { grid-column: 1; grid-row: auto; }
+  }
+
+  /* ANIMATIONS */
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .panel { animation: slideIn 0.4s ease both; }
+
+  /* TELEMETRY BARS */
+  .telem-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+
+  .telem-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.58rem;
+    color: var(--text-dim);
+    width: 45px;
+    flex-shrink: 0;
+    text-align: right;
+  }
+
+  .telem-track {
+    flex: 1;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .telem-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.5s;
+  }
+
+  .telem-num {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.58rem;
+    color: var(--accent);
+    width: 30px;
+    flex-shrink: 0;
+  }
+
+  /* CHECKBOX STYLE DETECTION */
+  .detect-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+  }
+
+  .detect-option:last-child { border-bottom: none; }
+
+  .detect-checkbox {
+    width: 14px;
+    height: 14px;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.6rem;
+    transition: all 0.2s;
+    flex-shrink: 0;
+  }
+
+  .detect-checkbox.on {
+    border-color: var(--accent);
+    background: rgba(0,212,255,0.15);
+    color: var(--accent);
+  }
+
+  .detect-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.62rem;
+    color: var(--text);
+    flex: 1;
+  }
+
+  .detect-count {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.58rem;
+    color: var(--text-dim);
+  }
+
+  /* COUNTDOWN */
+  .countdown-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255,45,85,0.15);
+    backdrop-filter: blur(2px);
+    z-index: 10;
+    display: none;
+  }
+
+  .countdown-circle {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    border: 3px solid var(--danger);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Orbitron', monospace;
+    font-size: 2rem;
+    font-weight: 900;
+    color: var(--danger);
+    text-shadow: 0 0 20px var(--danger);
+    box-shadow: 0 0 30px rgba(255,45,85,0.4);
+    animation: spin-border 1s linear infinite;
+  }
+
+  @keyframes spin-border {
+    from { box-shadow: 0 0 30px rgba(255,45,85,0.4), inset 0 0 20px rgba(255,45,85,0.1); }
+    to { box-shadow: 0 0 50px rgba(255,45,85,0.7), inset 0 0 30px rgba(255,45,85,0.2); }
+  }
+
+  /* ── CAMERA PICKER BUTTON ── */
+  .cam-header-btn {
+    position: relative;
+    font-family: 'Orbitron', monospace;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    padding: 8px 16px;
+    border: 1px solid var(--accent2);
+    background: transparent;
+    color: var(--accent2);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    white-space: nowrap;
+  }
+  .cam-header-btn:hover { background: rgba(0,255,136,0.1); box-shadow: var(--glow2); }
+  .cam-header-btn.active {
+    background: rgba(0,255,136,0.15);
+    box-shadow: var(--glow2);
+    border-color: var(--accent2);
+  }
+  .cam-header-btn.stopping {
+    border-color: var(--danger);
+    color: var(--danger);
+    background: rgba(255,45,85,0.08);
+  }
+
+  /* Camera source dropdown */
+  .cam-dropdown {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    min-width: 230px;
+    z-index: 200;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+    display: none;
+    animation: dropDown 0.15s ease;
+  }
+  .cam-dropdown.open { display: block; }
+
+  @keyframes dropDown {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .cam-dropdown-header {
+    padding: 8px 12px;
+    font-family: 'Orbitron', monospace;
+    font-size: 0.55rem;
+    letter-spacing: 0.2em;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    background: rgba(0,0,0,0.2);
+    text-transform: uppercase;
+  }
+
+  .cam-source-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    cursor: pointer;
+    transition: background 0.15s;
+    border-bottom: 1px solid rgba(26,37,64,0.5);
+  }
+  .cam-source-option:last-child { border-bottom: none; }
+  .cam-source-option:hover { background: rgba(0,255,136,0.07); }
+  .cam-source-option:active { background: rgba(0,255,136,0.14); }
+
+  .cam-source-icon {
+    font-size: 1.2rem;
+    width: 28px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+  .cam-source-info { flex: 1; }
+  .cam-source-name {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.68rem;
+    color: var(--text);
+    letter-spacing: 0.05em;
+  }
+  .cam-source-desc {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.55rem;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
+  .cam-source-badge {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.52rem;
+    padding: 2px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--accent2);
+    color: var(--accent2);
+    background: rgba(0,255,136,0.06);
+    flex-shrink: 0;
+  }
+
+  /* Divider in dropdown */
+  .cam-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 0;
+  }
+
+  /* Device list items */
+  .cam-device-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px 8px 20px;
+    cursor: pointer;
+    transition: background 0.15s;
+    border-bottom: 1px solid rgba(26,37,64,0.3);
+  }
+  .cam-device-item:last-child { border-bottom: none; }
+  .cam-device-item:hover { background: rgba(0,212,255,0.07); }
+  .cam-device-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cam-device-item.selected .cam-device-label { color: var(--accent); }
+
+  /* Loading spinner inside dropdown */
+  .cam-loading {
+    padding: 12px 14px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    text-align: center;
+    letter-spacing: 0.1em;
+  }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<header>
+  <div class="logo">
+    <div class="logo-icon">
+      <svg viewBox="0 0 40 40" fill="none">
+        <rect x="4" y="12" width="32" height="18" rx="3" stroke="#00d4ff" stroke-width="1.5"/>
+        <circle cx="11" cy="30" r="4" stroke="#00d4ff" stroke-width="1.5"/>
+        <circle cx="29" cy="30" r="4" stroke="#00d4ff" stroke-width="1.5"/>
+        <rect x="8" y="8" width="24" height="8" rx="2" stroke="#00ff88" stroke-width="1.2"/>
+        <line x1="20" y1="12" x2="20" y2="30" stroke="#00d4ff" stroke-width="0.8" stroke-dasharray="2,2"/>
+        <circle cx="20" cy="20" r="3" fill="#00d4ff" opacity="0.5"/>
+        <path d="M13 18 L20 14 L27 18" stroke="#00ff88" stroke-width="1" fill="none"/>
+      </svg>
+    </div>
+    <div>
+      <div class="logo-text">ESP32U — V4</div>
+      <div class="logo-sub">AUTONOMOUS VEHICLE SYSTEM</div>
+    </div>
+  </div>
+
+  <div class="header-status">
+    <div class="status-pill">
+      <div class="status-dot" id="bleStatusDot"></div>
+      <span id="bleStatusText" style="font-family:'Share Tech Mono',monospace;font-size:0.65rem;letter-spacing:0.1em;">BLE: DÉCONNECTÉ</span>
+    </div>
+    <div class="status-pill">
+      <div class="status-dot" id="camStatusDot"></div>
+      <span id="camStatusText" style="font-family:'Share Tech Mono',monospace;font-size:0.65rem;letter-spacing:0.1em;">CAM: INACTIVE</span>
+    </div>
+
+    <!-- ── CAMERA PICKER ── -->
+    <div style="position:relative;" id="camPickerWrapper">
+      <button class="cam-header-btn" id="camHeaderBtn" onclick="toggleCamDropdown(event)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+          <circle cx="12" cy="13" r="4"/>
+        </svg>
+        <span id="camHeaderLabel">CAMÉRA</span>
+        <svg id="camChevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+
+      <!-- Dropdown sources -->
+      <div class="cam-dropdown" id="camDropdown">
+        <div class="cam-dropdown-header">▸ SÉLECTIONNER SOURCE</div>
+
+        <div class="cam-source-option" onclick="startCameraSource('pc')">
+          <div class="cam-source-icon">🖥️</div>
+          <div class="cam-source-info">
+            <div class="cam-source-name">WEBCAM PC</div>
+            <div class="cam-source-desc">Caméra intégrée ou USB</div>
+          </div>
+          <div class="cam-source-badge">USER</div>
+        </div>
+
+        <div class="cam-source-option" onclick="startCameraSource('front')">
+          <div class="cam-source-icon">🤳</div>
+          <div class="cam-source-info">
+            <div class="cam-source-name">SMARTPHONE AVANT</div>
+            <div class="cam-source-desc">Caméra frontale (selfie)</div>
+          </div>
+          <div class="cam-source-badge">FRONT</div>
+        </div>
+
+        <div class="cam-source-option" onclick="startCameraSource('rear')">
+          <div class="cam-source-icon">📷</div>
+          <div class="cam-source-info">
+            <div class="cam-source-name">SMARTPHONE ARRIÈRE</div>
+            <div class="cam-source-desc">Caméra principale (HD)</div>
+          </div>
+          <div class="cam-source-badge">REAR</div>
+        </div>
+
+        <div class="cam-divider"></div>
+
+        <!-- Liste des périphériques détectés -->
+        <div class="cam-dropdown-header" style="border-top:none;">▸ PÉRIPHÉRIQUES DÉTECTÉS</div>
+        <div id="camDeviceList">
+          <div class="cam-loading" id="camDeviceLoading">⟳ Énumération des caméras...</div>
+        </div>
+
+        <div class="cam-divider"></div>
+
+        <!-- Arrêt -->
+        <div class="cam-source-option" onclick="stopCameraFromDropdown()" id="camStopOption" style="display:none;">
+          <div class="cam-source-icon">⏹</div>
+          <div class="cam-source-info">
+            <div class="cam-source-name" style="color:var(--danger)">ARRÊTER CAMÉRA</div>
+            <div class="cam-source-desc">Libérer le flux vidéo</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <button class="ble-btn" id="bleBtn" onclick="toggleBLE()">⬡ CONNECTER BLE</button>
+  </div>
+</header>
+
+<!-- MAIN -->
+<div class="main">
+
+  <!-- LEFT COLUMN -->
+  <div style="display:flex;flex-direction:column;gap:12px;">
+
+    <!-- DETECTION MODULES -->
+    <div class="panel panel-green" style="animation-delay:0.05s">
+      <div class="panel-header">
+        <span class="panel-title">Détection Active</span>
+        <span class="panel-badge" style="color:var(--accent2);border-color:rgba(0,255,136,0.3);background:rgba(0,255,136,0.05)" id="detCount">0 modules</span>
+      </div>
+      <div class="panel-content">
+        <div id="detectOptions">
+          <div class="detect-option" onclick="toggleDetect(this,'lines')">
+            <div class="detect-checkbox on">✓</div>
+            <span class="detect-label">Suivi de lignes</span>
+            <span class="detect-count" id="cnt-lines">0</span>
+          </div>
+          <div class="detect-option" onclick="toggleDetect(this,'stop')">
+            <div class="detect-checkbox on">✓</div>
+            <span class="detect-label">Panneaux STOP</span>
+            <span class="detect-count" id="cnt-stop">0</span>
+          </div>
+          <div class="detect-option" onclick="toggleDetect(this,'lights')">
+            <div class="detect-checkbox on">✓</div>
+            <span class="detect-label">Feux circulation</span>
+            <span class="detect-count" id="cnt-lights">0</span>
+          </div>
+          <div class="detect-option" onclick="toggleDetect(this,'pedestrian')">
+            <div class="detect-checkbox on">✓</div>
+            <span class="detect-label">Piétons</span>
+            <span class="detect-count" id="cnt-pedestrian">0</span>
+          </div>
+          <div class="detect-option" onclick="toggleDetect(this,'cyclists')">
+            <div class="detect-checkbox on">✓</div>
+            <span class="detect-label">Cyclistes</span>
+            <span class="detect-count" id="cnt-cyclists">0</span>
+          </div>
+          <div class="detect-option" onclick="toggleDetect(this,'vehicles')">
+            <div class="detect-checkbox on">✓</div>
+            <span class="detect-label">Véhicules</span>
+            <span class="detect-count" id="cnt-vehicles">0</span>
+          </div>
+          <div class="detect-option" onclick="toggleDetect(this,'obstacles')">
+            <div class="detect-checkbox on">✓</div>
+            <span class="detect-label">Obstacles</span>
+            <span class="detect-count" id="cnt-obstacles">0</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- COLOR SELECTOR -->
+    <div class="panel" style="animation-delay:0.1s">
+      <div class="panel-header">
+        <span class="panel-title">Couleur de Ligne</span>
+        <span class="panel-badge" id="colorBadge">BLANC</span>
+      </div>
+      <div class="panel-content">
+        <div class="color-grid">
+          <div class="color-btn selected" onclick="selectColor(this,'white','#ffffff','BLANC')" data-color="white">
+            <div class="color-dot" style="background:#ffffff;"></div>
+            <span>Blanc</span>
+          </div>
+          <div class="color-btn" onclick="selectColor(this,'black','#333333','NOIR')" data-color="black">
+            <div class="color-dot" style="background:#333333;border-color:#555;"></div>
+            <span>Noir</span>
+          </div>
+          <div class="color-btn" onclick="selectColor(this,'red','#ff2d55','ROUGE')" data-color="red">
+            <div class="color-dot" style="background:#ff2d55;"></div>
+            <span>Rouge</span>
+          </div>
+          <div class="color-btn" onclick="selectColor(this,'green','#00ff88','VERT')" data-color="green">
+            <div class="color-dot" style="background:#00ff88;"></div>
+            <span>Vert</span>
+          </div>
+          <div class="color-btn" onclick="selectColor(this,'yellow','#ffcc00','JAUNE')" data-color="yellow">
+            <div class="color-dot" style="background:#ffcc00;"></div>
+            <span>Jaune</span>
+          </div>
+          <div class="color-btn" onclick="selectColor(this,'blue','#00d4ff','BLEU')" data-color="blue">
+            <div class="color-dot" style="background:#00d4ff;"></div>
+            <span>Bleu</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SIGNS DETECTED -->
+    <div class="panel panel-yellow" style="animation-delay:0.15s">
+      <div class="panel-header">
+        <span class="panel-title">Panneaux / Feux</span>
+        <span class="panel-badge" id="signBadge" style="color:var(--accent4);border-color:rgba(255,204,0,0.3);background:rgba(255,204,0,0.05)">AUCUN</span>
+      </div>
+      <div class="panel-content">
+        <div class="sign-display" id="signDisplay">
+          <div class="sign-icon-big">🔍</div>
+          <div class="sign-info">
+            <div class="sign-name">EN ATTENTE</div>
+            <div class="sign-action">Démarrer la caméra pour détecter</div>
+          </div>
+          <div class="sign-conf" style="color:var(--text-dim)">—</div>
+        </div>
+        <div class="detection-grid" style="grid-template-columns:repeat(4,1fr);">
+          <div class="det-badge" id="badge-stop">🛑<span style="font-size:0.5rem">STOP</span></div>
+          <div class="det-badge" id="badge-red">🔴<span style="font-size:0.5rem">ROUGE</span></div>
+          <div class="det-badge" id="badge-green-light">🟢<span style="font-size:0.5rem">VERT</span></div>
+          <div class="det-badge" id="badge-yield">⚠️<span style="font-size:0.5rem">CÉDER</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- CENTER: VIDEO -->
+  <div class="panel video-panel" style="animation-delay:0.2s">
+    <div class="panel-header">
+      <span class="panel-title">Vision Temps Réel</span>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <div class="mode-tabs" style="margin:0;">
+          <div class="mode-tab active" onclick="setViewMode(this,'normal')">NORMAL</div>
+          <div class="mode-tab" onclick="setViewMode(this,'edge')">CONTOURS</div>
+          <div class="mode-tab" onclick="setViewMode(this,'color')">COULEUR</div>
+        </div>
+        <span class="panel-badge" id="fpsBadge">0 FPS</span>
+      </div>
+    </div>
+
+    <div class="video-container" id="videoContainer">
+      <video id="videoFeed" autoplay muted playsinline></video>
+      <canvas id="overlayCanvas"></canvas>
+
+      <div class="video-hud">
+        <div class="hud-corner hud-tl"></div>
+        <div class="hud-corner hud-tr"></div>
+        <div class="hud-corner hud-bl"></div>
+        <div class="hud-corner hud-br"></div>
+        <div class="hud-scan" id="scanLine"></div>
+      </div>
+
+      <div class="video-overlay-info">
+        <div>
+          <div class="vid-stat" id="resolutionBadge">1280×720</div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end;">
+          <div class="vid-recording" id="recBadge" style="display:none;">
+            <div class="rec-dot"></div> ANALYSE
+          </div>
+          <div class="vid-stat" id="modeBadge">MODE: MANUEL</div>
+        </div>
+      </div>
+
+      <div class="countdown-overlay" id="stopCountdown">
+        <div>
+          <div style="font-family:'Orbitron',monospace;font-size:0.7rem;color:var(--danger);text-align:center;margin-bottom:8px;letter-spacing:0.3em;">STOP DÉTECTÉ</div>
+          <div class="countdown-circle" id="countdownNum">2</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="padding:10px 14px;">
+      <!-- Camera source info bar -->
+      <div id="camSourceBar" style="display:none;align-items:center;gap:10px;padding:7px 12px;border:1px solid var(--border);border-radius:4px;background:rgba(0,255,136,0.05);margin-bottom:8px;">
+        <div style="width:8px;height:8px;border-radius:50%;background:var(--accent2);box-shadow:0 0 8px var(--accent2);animation:pulse 2s infinite;flex-shrink:0;"></div>
+        <span id="camSourceName" style="font-family:'Share Tech Mono',monospace;font-size:0.62rem;color:var(--accent2);flex:1;"></span>
+        <span id="camResInfo" style="font-family:'Share Tech Mono',monospace;font-size:0.58rem;color:var(--text-dim);"></span>
+        <button onclick="stopCamera()" style="font-family:'Orbitron',monospace;font-size:0.55rem;padding:3px 10px;border:1px solid var(--danger);background:rgba(255,45,85,0.08);color:var(--danger);border-radius:3px;cursor:pointer;letter-spacing:0.1em;">⏹ STOP</button>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;">
+        <div>
+          <div style="font-family:'Share Tech Mono',monospace;font-size:0.6rem;color:var(--text-dim);margin-bottom:4px;">OBJETS DÉTECTÉS (FRAME)</div>
+          <div class="detection-grid">
+            <div class="det-badge" id="db-ped">🚶 <span>0</span></div>
+            <div class="det-badge" id="db-cyc">🚴 <span>0</span></div>
+            <div class="det-badge" id="db-car">🚗 <span>0</span></div>
+            <div class="det-badge" id="db-obs">⬛ <span>0</span></div>
+          </div>
+        </div>
+        <div>
+          <div style="font-family:'Share Tech Mono',monospace;font-size:0.6rem;color:var(--text-dim);margin-bottom:4px;">LIGNES DÉTECTÉES</div>
+          <div id="linesBadges" style="display:flex;flex-wrap:wrap;gap:4px;">
+            <div style="font-family:'Share Tech Mono',monospace;font-size:0.6rem;color:var(--text-dim);">En attente...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT COLUMN -->
+  <div style="display:flex;flex-direction:column;gap:12px;">
+
+    <!-- AUTONOMOUS MODE -->
+    <div class="panel panel-orange" style="animation-delay:0.05s">
+      <div class="panel-header">
+        <span class="panel-title">Mode Pilotage</span>
+      </div>
+      <div class="panel-content">
+        <div class="auto-toggle" id="autoToggle" onclick="toggleAutoMode()">
+          <div>
+            <div class="auto-toggle-label" id="autoLabel" style="color:var(--text-dim)">⚙ MODE MANUEL</div>
+            <div style="font-family:'Share Tech Mono',monospace;font-size:0.6rem;color:var(--text-dim);margin-top:2px;" id="autoSubLabel">Contrôle direct actif</div>
+          </div>
+          <div class="toggle-switch" id="autoSwitch"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MOTOR CONTROL -->
+    <div class="panel" style="animation-delay:0.1s">
+      <div class="panel-header">
+        <span class="panel-title">Contrôle Moteur</span>
+        <span class="panel-badge" id="motorState">ARRÊT</span>
+      </div>
+      <div class="panel-content">
+        <div class="dpad">
+          <div class="dpad-btn dpad-empty"></div>
+          <div class="dpad-btn" id="btn-fwd" onmousedown="motorCmd('F')" onmouseup="motorCmd('S')" onmouseleave="motorCmd('S')" ontouchstart="motorCmd('F')" ontouchend="motorCmd('S')">▲</div>
+          <div class="dpad-btn dpad-empty"></div>
+          <div class="dpad-btn" id="btn-left" onmousedown="motorCmd('L')" onmouseup="motorCmd('S')" onmouseleave="motorCmd('S')" ontouchstart="motorCmd('L')" ontouchend="motorCmd('S')">◀</div>
+          <div class="dpad-btn center" id="btn-stop" onclick="motorCmd('S')">STOP</div>
+          <div class="dpad-btn" id="btn-right" onmousedown="motorCmd('R')" onmouseup="motorCmd('S')" onmouseleave="motorCmd('S')" ontouchstart="motorCmd('R')" ontouchend="motorCmd('S')">▶</div>
+          <div class="dpad-btn dpad-empty"></div>
+          <div class="dpad-btn" id="btn-bwd" onmousedown="motorCmd('B')" onmouseup="motorCmd('S')" onmouseleave="motorCmd('S')" ontouchstart="motorCmd('B')" ontouchend="motorCmd('S')">▼</div>
+          <div class="dpad-btn dpad-empty"></div>
+        </div>
+
+        <div class="speed-control">
+          <div class="slider-label">
+            <span>VITESSE PWM</span>
+            <span class="slider-val" id="speedVal">150 / 255</span>
+          </div>
+          <input type="range" id="speedSlider" min="0" max="255" value="150" oninput="updateSpeed(this.value)">
+        </div>
+
+        <div class="speed-control" style="margin-top:10px;">
+          <div class="slider-label">
+            <span>DISTANCE SÉCURITÉ</span>
+            <span class="slider-val" id="safeDistVal">30 cm</span>
+          </div>
+          <input type="range" id="safeDistSlider" min="10" max="100" value="30" oninput="updateSafeDist(this.value)">
+        </div>
+
+        <button class="emergency-btn" onclick="emergencyStop()">⚠ ARRÊT D'URGENCE</button>
+      </div>
+    </div>
+
+    <!-- TELEMETRY -->
+    <div class="panel panel-green" style="animation-delay:0.15s">
+      <div class="panel-header">
+        <span class="panel-title">Télémétrie</span>
+        <span class="panel-badge" style="color:var(--accent2);border-color:rgba(0,255,136,0.3)">LIVE</span>
+      </div>
+      <div class="panel-content">
+        <div class="stats-grid" style="margin-bottom:10px;">
+          <div class="stat-card" id="distCard">
+            <div class="stat-label">DISTANCE</div>
+            <div class="stat-value">—<span class="stat-unit">cm</span></div>
+            <div class="distance-bar"><div class="distance-fill" id="distFill" style="width:100%"></div></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">VITESSE ACT.</div>
+            <div class="stat-value" id="actualSpeed">0<span class="stat-unit">%</span></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">DIRECTION</div>
+            <div class="stat-value" style="font-size:0.9rem;" id="dirDisplay">ARRÊT</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">FRAME RATE</div>
+            <div class="stat-value" id="fpsDisplay">0<span class="stat-unit">fps</span></div>
+          </div>
+        </div>
+
+        <div style="font-family:'Share Tech Mono',monospace;font-size:0.58rem;color:var(--text-dim);margin-bottom:6px;letter-spacing:0.1em;">MOTEURS L298N</div>
+        <div class="telem-bar">
+          <span class="telem-label">M.GAUCHE</span>
+          <div class="telem-track"><div class="telem-fill" id="motorL" style="width:0%;background:var(--accent);"></div></div>
+          <span class="telem-num" id="motorLVal">0%</span>
+        </div>
+        <div class="telem-bar">
+          <span class="telem-label">M.DROIT</span>
+          <div class="telem-track"><div class="telem-fill" id="motorR" style="width:0%;background:var(--accent2);"></div></div>
+          <span class="telem-num" id="motorRVal">0%</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- EVENT LOG -->
+    <div class="panel" style="animation-delay:0.2s">
+      <div class="panel-header">
+        <span class="panel-title">Journal Événements</span>
+        <button onclick="clearLog()" style="font-family:'Share Tech Mono',monospace;font-size:0.58rem;background:transparent;border:none;color:var(--text-dim);cursor:pointer;letter-spacing:0.1em;">EFFACER</button>
+      </div>
+      <div class="panel-content" style="padding:8px 12px;">
+        <div class="event-log" id="eventLog"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- STATUS BAR -->
+<div class="status-bar">
+  <div class="status-items">
+    <div class="s-item"><div class="s-dot" style="background:var(--accent2)"></div><span>ESP32U V4</span></div>
+    <div class="s-item"><div class="s-dot" id="sd-ble" style="background:var(--text-dim)"></div><span>BLE GATT</span></div>
+    <div class="s-item"><div class="s-dot" id="sd-cam" style="background:var(--text-dim)"></div><span>CAMÉRA</span></div>
+    <div class="s-item"><div class="s-dot" id="sd-cv" style="background:var(--text-dim)"></div><span>VISION</span></div>
+  </div>
+  <div class="status-items">
+    <span id="systemTime">--:--:--</span>
+    <span>|</span>
+    <span id="uptime">UP: 0s</span>
+    <span>|</span>
+    <span>L298N BRIDGE</span>
+    <span>|</span>
+    <span>BLE UUID: 4FAFC201-1FB5-459E-8FCC</span>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// STATE
+// ============================================================
+const state = {
+  ble: { connected: false, device: null, characteristic: null },
+  camera: { active: false, stream: null, deviceId: null, sourceName: '' },
+  motor: { direction: 'S', speed: 150, safeDist: 30 },
+  auto: false,
+  viewMode: 'normal',
+  selectedColor: 'white',
+  detections: { lines: true, stop: true, lights: true, pedestrian: true, cyclists: true, vehicles: true, obstacles: true },
+  counts: { lines: 0, stop: 0, lights: 0, pedestrian: 0, cyclists: 0, vehicles: 0, obstacles: 0 },
+  frameCount: 0,
+  fps: 0,
+  startTime: Date.now(),
+  lastFrameTime: Date.now(),
+  distance: null,
+  stopCountdown: null
+};
+
+// BLE UUIDs (ESP32 standard)
+const BLE_SERVICE = '4fafc201-1fb5-459e-8fcc-b347b9201064';
+const BLE_CHAR_TX = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
+
+// ============================================================
+// CLOCK & UPTIME
+// ============================================================
+setInterval(() => {
+  const now = new Date();
+  document.getElementById('systemTime').textContent =
+    now.toLocaleTimeString('fr-FR');
+  const up = Math.floor((Date.now() - state.startTime) / 1000);
+  document.getElementById('uptime').textContent = `UP: ${formatUptime(up)}`;
+}, 1000);
+
+function formatUptime(s) {
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s/60)}m${s%60}s`;
+  return `${Math.floor(s/3600)}h${Math.floor((s%3600)/60)}m`;
+}
+
+// ============================================================
+// LOG
+// ============================================================
+function log(msg, type = 'info') {
+  const log = document.getElementById('eventLog');
+  const now = new Date().toLocaleTimeString('fr-FR');
+  const entry = document.createElement('div');
+  entry.className = `log-entry ${type}`;
+  entry.innerHTML = `<span class="log-time">[${now}]</span><span class="log-msg">${msg}</span>`;
+  log.prepend(entry);
+  // Keep only 50 entries
+  while (log.children.length > 50) log.removeChild(log.lastChild);
+}
+
+function clearLog() {
+  document.getElementById('eventLog').innerHTML = '';
+  log('Journal effacé', 'info');
+}
+
+// ============================================================
+// BLE
+// ============================================================
+async function toggleBLE() {
+  if (state.ble.connected) {
+    disconnectBLE();
+  } else {
+    await connectBLE();
+  }
+}
+
+async function connectBLE() {
+  if (!navigator.bluetooth) {
+    log('❌ Web Bluetooth non supporté sur ce navigateur', 'danger');
+    alert('Web Bluetooth non supporté. Utilisez Chrome sur Android.');
+    return;
+  }
+  try {
+    log('🔍 Recherche ESP32U...', 'info');
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [
+        { name: 'ESP32_AutoCar' },
+        { namePrefix: 'ESP32' },
+        { services: [BLE_SERVICE] }
+      ],
+      optionalServices: [BLE_SERVICE]
+    });
+    state.ble.device = device;
+    device.addEventListener('gattserverdisconnected', onBLEDisconnect);
+
+    log(`📡 Connexion à "${device.name}"...`, 'info');
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(BLE_SERVICE);
+    state.ble.characteristic = await service.getCharacteristic(BLE_CHAR_TX);
+
+    state.ble.connected = true;
+    updateBLEUI(true);
+    log(`✅ Connecté: ${device.name}`, 'success');
+  } catch (err) {
+    log(`❌ BLE Erreur: ${err.message}`, 'danger');
+    // Simulate for demo
+    simulateBLEConnect();
+  }
+}
+
+function simulateBLEConnect() {
+  state.ble.connected = true;
+  state.ble.device = { name: 'ESP32_AutoCar [SIMULÉ]' };
+  updateBLEUI(true);
+  log('⚡ Mode simulation activé (BLE simulé)', 'warning');
+}
+
+function disconnectBLE() {
+  if (state.ble.device && state.ble.device.gatt && state.ble.device.gatt.connected) {
+    state.ble.device.gatt.disconnect();
+  }
+  state.ble.connected = false;
+  state.ble.characteristic = null;
+  updateBLEUI(false);
+  log('🔌 BLE déconnecté', 'warning');
+}
+
+function onBLEDisconnect() {
+  state.ble.connected = false;
+  updateBLEUI(false);
+  log('⚠ BLE déconnecté inopinément', 'danger');
+}
+
+function updateBLEUI(connected) {
+  const dot = document.getElementById('bleStatusDot');
+  const txt = document.getElementById('bleStatusText');
+  const btn = document.getElementById('bleBtn');
+  const sdBle = document.getElementById('sd-ble');
+
+  if (connected) {
+    dot.className = 'status-dot connected';
+    txt.textContent = 'BLE: CONNECTÉ';
+    btn.textContent = '⬡ DÉCONNECTER';
+    btn.classList.add('connected');
+    sdBle.style.background = 'var(--accent2)';
+  } else {
+    dot.className = 'status-dot';
+    txt.textContent = 'BLE: DÉCONNECTÉ';
+    btn.textContent = '⬡ CONNECTER BLE';
+    btn.classList.remove('connected');
+    sdBle.style.background = 'var(--text-dim)';
+  }
+}
+
+async function sendBLE(cmd) {
+  if (!state.ble.connected) return;
+  try {
+    if (state.ble.characteristic) {
+      const encoder = new TextEncoder();
+      await state.ble.characteristic.writeValue(encoder.encode(cmd));
+    }
+    // Simulation feedback
+    console.log('BLE CMD:', cmd);
+  } catch(e) {
+    log(`BLE erreur envoi: ${e.message}`, 'danger');
+  }
+}
+
+// ============================================================
+// CAMERA PICKER — DROPDOWN
+// ============================================================
+let camDropdownOpen = false;
+
+function toggleCamDropdown(e) {
+  e.stopPropagation();
+  camDropdownOpen = !camDropdownOpen;
+  const dd = document.getElementById('camDropdown');
+  const chevron = document.getElementById('camChevron');
+  if (camDropdownOpen) {
+    dd.classList.add('open');
+    chevron.style.transform = 'rotate(180deg)';
+    enumerateCameras();
+  } else {
+    dd.classList.remove('open');
+    chevron.style.transform = '';
+  }
+}
+
+// Close dropdown on outside click
+document.addEventListener('click', (e) => {
+  if (!document.getElementById('camPickerWrapper').contains(e.target)) {
+    closeCamDropdown();
+  }
+});
+
+function closeCamDropdown() {
+  camDropdownOpen = false;
+  document.getElementById('camDropdown').classList.remove('open');
+  const chevron = document.getElementById('camChevron');
+  if (chevron) chevron.style.transform = '';
+}
+
+// Enumerate all available video input devices
+async function enumerateCameras() {
+  const listEl = document.getElementById('camDeviceList');
+  const loadingEl = document.getElementById('camDeviceLoading');
+
+  try {
+    // Request permission first so labels are populated
+    let tempStream = null;
+    try {
+      tempStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    } catch(_) {}
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videoDevices = devices.filter(d => d.kind === 'videoinput');
+
+    if (tempStream) tempStream.getTracks().forEach(t => t.stop());
+
+    if (videoDevices.length === 0) {
+      listEl.innerHTML = '<div class="cam-loading">Aucune caméra trouvée</div>';
+      return;
+    }
+
+    listEl.innerHTML = videoDevices.map((dev, i) => {
+      const label = dev.label || `Caméra ${i + 1}`;
+      const isCurrent = state.camera.deviceId === dev.deviceId;
+      return `<div class="cam-device-item ${isCurrent ? 'selected' : ''}"
+                   onclick="startCameraByDeviceId('${dev.deviceId}','${label.replace(/'/g,'')}')"
+                   title="${label}">
+        <span style="font-size:0.85rem;">📹</span>
+        <span class="cam-device-label">${label}</span>
+        ${isCurrent ? '<span style="color:var(--accent);font-size:0.6rem;font-family:Share Tech Mono,monospace;">● ACT.</span>' : ''}
+      </div>`;
+    }).join('');
+  } catch(err) {
+    listEl.innerHTML = `<div class="cam-loading" style="color:var(--danger);">Erreur: ${err.message}</div>`;
+  }
+}
+
+// ============================================================
+// CAMERA — START / STOP (MediaDevices API robuste)
+// ============================================================
+async function toggleCamera() {
+  if (state.camera.active) stopCamera();
+  else toggleCamDropdown({ stopPropagation: () => {} });
+}
+
+async function startCameraSource(source) {
+  closeCamDropdown();
+  let constraints = {};
+  let sourceName = '';
+
+  switch(source) {
+    case 'pc':
+      constraints = { video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }, audio: false };
+      sourceName = '🖥️ WEBCAM PC';
+      break;
+    case 'front':
+      constraints = { video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: { exact: 'user' } }, audio: false };
+      sourceName = '🤳 CAM. AVANT';
+      break;
+    case 'rear':
+      constraints = { video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: { exact: 'environment' } }, audio: false };
+      sourceName = '📷 CAM. ARRIÈRE';
+      break;
+  }
+
+  await startCameraWithConstraints(constraints, sourceName);
+}
+
+async function startCameraByDeviceId(deviceId, label) {
+  closeCamDropdown();
+  const constraints = {
+    video: { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false
+  };
+  state.camera.deviceId = deviceId;
+  await startCameraWithConstraints(constraints, `📹 ${label}`);
+}
+
+async function startCameraWithConstraints(constraints, sourceName) {
+  // Stop any existing stream first
+  if (state.camera.active) stopCamera();
+
+  // Update button to loading state
+  const btn = document.getElementById('camHeaderBtn');
+  const label = document.getElementById('camHeaderLabel');
+  label.textContent = '⟳ INIT...';
+  btn.style.opacity = '0.7';
+  btn.disabled = true;
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    const video = document.getElementById('videoFeed');
+    video.srcObject = stream;
+    state.camera.stream = stream;
+    state.camera.active = true;
+    state.camera.sourceName = sourceName;
+
+    // Ensure video plays
+    video.play().catch(() => {});
+
+    video.onloadedmetadata = () => {
+      const W = video.videoWidth;
+      const H = video.videoHeight;
+      const canvas = document.getElementById('overlayCanvas');
+      canvas.width = W;
+      canvas.height = H;
+      document.getElementById('resolutionBadge').textContent = `${W}×${H}`;
+      document.getElementById('camResInfo').textContent = `${W}×${H}`;
+      startVision();
+      log(`📷 ${sourceName} démarrée — ${W}×${H}`, 'success');
+    };
+
+    // Update UI
+    updateCameraUI(true, sourceName);
+
+  } catch(err) {
+    label.textContent = 'CAMÉRA';
+    btn.style.opacity = '';
+    btn.disabled = false;
+
+    // Fallback: if exact facingMode fails, retry without exact
+    if (err.name === 'OverconstrainedError' && constraints.video.facingMode?.exact) {
+      log(`⚠ Caméra exacte indisponible, tentative fallback...`, 'warning');
+      const fallback = { ...constraints, video: { ...constraints.video, facingMode: constraints.video.facingMode.exact } };
+      delete fallback.video.facingMode;
+      await startCameraWithConstraints(fallback, sourceName + ' (fallback)');
+      return;
+    }
+
+    log(`❌ Caméra: ${err.name} — ${err.message}`, 'danger');
+
+    // Detailed user guidance
+    if (err.name === 'NotAllowedError') {
+      log('💡 Vérifiez les permissions caméra dans votre navigateur', 'warning');
+    } else if (err.name === 'NotFoundError') {
+      log('💡 Aucune caméra trouvée. Vérifiez la connexion du périphérique', 'warning');
+    } else if (err.name === 'NotReadableError') {
+      log('💡 Caméra déjà utilisée par une autre application', 'warning');
+    }
+  }
+}
+
+function stopCamera() {
+  if (state.camera.stream) {
+    state.camera.stream.getTracks().forEach(t => t.stop());
+    state.camera.stream = null;
+  }
+  if (visionLoop) { cancelAnimationFrame(visionLoop); visionLoop = null; }
+
+  // Clear canvas
+  const canvas = document.getElementById('overlayCanvas');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  state.camera.active = false;
+  state.camera.deviceId = null;
+  updateCameraUI(false, '');
+  log('📷 Caméra arrêtée', 'warning');
+}
+
+function stopCameraFromDropdown() {
+  closeCamDropdown();
+  stopCamera();
+}
+
+function updateCameraUI(active, sourceName) {
+  const btn = document.getElementById('camHeaderBtn');
+  const label = document.getElementById('camHeaderLabel');
+  const dot = document.getElementById('camStatusDot');
+  const txt = document.getElementById('camStatusText');
+  const sourceBar = document.getElementById('camSourceBar');
+  const sourceNameEl = document.getElementById('camSourceName');
+  const stopOption = document.getElementById('camStopOption');
+  const sdCam = document.getElementById('sd-cam');
+  const sdCv  = document.getElementById('sd-cv');
+  const recBadge = document.getElementById('recBadge');
+
+  btn.disabled = false;
+  btn.style.opacity = '';
+
+  if (active) {
+    btn.classList.add('active');
+    btn.classList.remove('stopping');
+    label.textContent = '● EN DIRECT';
+    dot.className = 'status-dot connected';
+    txt.textContent = 'CAM: ACTIVE';
+    sourceBar.style.display = 'flex';
+    sourceNameEl.textContent = sourceName;
+    stopOption.style.display = 'flex';
+    sdCam.style.background = 'var(--accent2)';
+    sdCv.style.background  = 'var(--accent2)';
+    recBadge.style.display = 'flex';
+  } else {
+    btn.classList.remove('active', 'stopping');
+    label.textContent = 'CAMÉRA';
+    dot.className = 'status-dot';
+    txt.textContent = 'CAM: INACTIVE';
+    sourceBar.style.display = 'none';
+    stopOption.style.display = 'none';
+    sdCam.style.background = 'var(--text-dim)';
+    sdCv.style.background  = 'var(--text-dim)';
+    recBadge.style.display = 'none';
+  }
+}
+
+// ============================================================
+// COMPUTER VISION
+// ============================================================
+let visionLoop = null;
+let tempCanvas, tempCtx;
+
+function startVision() {
+  tempCanvas = document.createElement('canvas');
+  tempCtx = tempCanvas.getContext('2d');
+  visionLoop = requestAnimationFrame(processFrame);
+}
+
+// Compteur de frames pour throttling des détections lourdes
+let frameIndex = 0;
+
+function processFrame(ts) {
+  if (!state.camera.active) return;
+
+  const video = document.getElementById('videoFeed');
+  const canvas = document.getElementById('overlayCanvas');
+  const ctx = canvas.getContext('2d');
+
+  if (video.readyState < 2) {
+    visionLoop = requestAnimationFrame(processFrame);
+    return;
+  }
+
+  const W = canvas.width, H = canvas.height;
+  tempCanvas.width = W; tempCanvas.height = H;
+  tempCtx.drawImage(video, 0, 0, W, H);
+  const imageData = tempCtx.getImageData(0, 0, W, H);
+
+  ctx.clearRect(0, 0, W, H);
+
+  if (state.viewMode === 'edge')  applyEdgeFilter(ctx, imageData, W, H);
+  else if (state.viewMode === 'color') applyColorFilter(ctx, imageData, W, H);
+
+  // Détection lignes — chaque frame
+  if (state.detections.lines) detectLines(ctx, imageData, W, H);
+
+  // Détections lourdes — toutes les 3 frames (~7/s à 20fps)
+  if (frameIndex % 3 === 0) {
+    if (state.detections.stop)      detectStopSign(ctx, imageData, W, H);
+    if (state.detections.lights)    detectTrafficLight(ctx, imageData, W, H);
+    if (state.detections.obstacles) detectColorObstacle(ctx, imageData, W, H);
+  }
+  frameIndex++;
+
+  drawGuide(ctx, W, H);
+
+  state.frameCount++;
+  const elapsed = ts - state.lastFrameTime;
+  if (elapsed > 500) {
+    state.fps = Math.round(state.frameCount * 1000 / elapsed);
+    state.frameCount = 0;
+    state.lastFrameTime = ts;
+    document.getElementById('fpsBadge').textContent = `${state.fps} FPS`;
+    document.getElementById('fpsDisplay').innerHTML = `${state.fps}<span class="stat-unit">fps</span>`;
+  }
+
+  visionLoop = requestAnimationFrame(processFrame);
+}
+
+function detectLines(ctx, imageData, W, H) {
+  const data = imageData.data;
+  const colorMap = {
+    white: { r: [200,255], g: [200,255], b: [200,255], color: '#ffffff' },
+    black: { r: [0,60], g: [0,60], b: [0,60], color: '#888888' },
+    red: { r: [150,255], g: [0,80], b: [0,80], color: '#ff2d55' },
+    green: { r: [0,80], g: [120,255], b: [0,80], color: '#00ff88' },
+    yellow: { r: [180,255], g: [160,255], b: [0,80], color: '#ffcc00' },
+    blue: { r: [0,80], g: [80,180], b: [150,255], color: '#00d4ff' }
+  };
+
+  const target = colorMap[state.selectedColor];
+  if (!target) return;
+
+  // Sample rows in lower half
+  let linePoints = [];
+  const sampleRows = [0.5, 0.6, 0.7, 0.8, 0.9];
+
+  sampleRows.forEach(rowFrac => {
+    const y = Math.floor(rowFrac * H);
+    let sum = 0, count = 0;
+    for (let x = 0; x < W; x += 4) {
+      const idx = (y * W + x) * 4;
+      const r = data[idx], g = data[idx+1], b = data[idx+2];
+      if (r >= target.r[0] && r <= target.r[1] &&
+          g >= target.g[0] && g <= target.g[1] &&
+          b >= target.b[0] && b <= target.b[1]) {
+        sum += x; count++;
+      }
+    }
+    if (count > 5) {
+      linePoints.push({ x: sum / count, y });
+    }
+  });
+
+  if (linePoints.length > 1) {
+    ctx.strokeStyle = target.color;
+    ctx.lineWidth = 3;
+    ctx.shadowColor = target.color;
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.moveTo(linePoints[0].x, linePoints[0].y);
+    linePoints.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    linePoints.forEach(p => {
+      ctx.fillStyle = target.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 5, 0, Math.PI*2);
+      ctx.fill();
+    });
+
+    // Auto steer if autonomous
+    if (state.auto) {
+      const lastPoint = linePoints[linePoints.length - 1];
+      const center = W / 2;
+      const error = lastPoint.x - center;
+      if (Math.abs(error) > W * 0.1) {
+        const cmd = error > 0 ? 'R' : 'L';
+        sendBLE(cmd);
+        updateMotorUI(cmd);
+      } else {
+        sendBLE('F');
+        updateMotorUI('F');
+      }
+    }
+
+    state.counts.lines++;
+    document.getElementById('cnt-lines').textContent = state.counts.lines;
+  }
+}
+
+// ============================================================
+// DÉTECTION PANNEAU STOP — Analyse pixel réelle
+// ============================================================
+// Algorithme :
+//  1. Diviser l'image en cellules de 20×20 px (grille)
+//  2. Pour chaque cellule, compter les pixels "rouge STOP"
+//     (rouge dominant, saturation élevée, hue ~0°/360°)
+//  3. Identifier les zones candidates : ≥40% pixels rouges
+//  4. Fusionner les zones adjacentes → bounding box
+//  5. Filtrer par ratio largeur/hauteur (carré/octogone ~1:1)
+//  6. Seuil de confiance = surface_rouge / surface_bbox
+// ============================================================
+
+// Cooldowns anti-flood (ms)
+const STOP_COOLDOWN = 4000;
+const LIGHT_COOLDOWN = 1000;
+let lastStopTime = 0;
+let lastLightTime = 0;
+let lastLightState = null;
+
+function isRedStop(r, g, b) {
+  // Rouge STOP : rouge très dominant, peu de vert/bleu
+  // Hue ≈ 0-15° ou 345-360° en HSV
+  if (r < 120) return false;
+  if (r < g * 1.6) return false;
+  if (r < b * 1.6) return false;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const sat = max === 0 ? 0 : (max - min) / max;
+  return sat > 0.45 && r === max;
+}
+
+function detectStopSign(ctx, imageData, W, H) {
+  const data = imageData.data;
+  const CELL = 20;          // taille cellule px
+  const cols = Math.floor(W / CELL);
+  const rows = Math.floor(H / CELL);
+  const MIN_RED_RATIO = 0.38;
+  const MIN_CELLS = 4;       // surface min ~80×80 px
+
+  // Carte de densité rouge
+  const redMap = new Uint8Array(cols * rows);
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      let redCount = 0, total = 0;
+      const x0 = col * CELL, y0 = row * CELL;
+      for (let dy = 0; dy < CELL; dy += 2) {
+        for (let dx = 0; dx < CELL; dx += 2) {
+          const idx = ((y0 + dy) * W + (x0 + dx)) * 4;
+          if (isRedStop(data[idx], data[idx+1], data[idx+2])) redCount++;
+          total++;
+        }
+      }
+      redMap[row * cols + col] = (redCount / total) >= MIN_RED_RATIO ? 1 : 0;
+    }
+  }
+
+  // Détection de blobs (flood fill simplifié)
+  const visited = new Uint8Array(cols * rows);
+  const blobs = [];
+
+  for (let i = 0; i < redMap.length; i++) {
+    if (!redMap[i] || visited[i]) continue;
+    // BFS
+    const queue = [i];
+    visited[i] = 1;
+    let cells = [];
+    while (queue.length) {
+      const cur = queue.shift();
+      cells.push(cur);
+      const r = Math.floor(cur / cols), c = cur % cols;
+      [[r-1,c],[r+1,c],[r,c-1],[r,c+1]].forEach(([nr,nc]) => {
+        if (nr<0||nr>=rows||nc<0||nc>=cols) return;
+        const ni = nr*cols+nc;
+        if (!visited[ni] && redMap[ni]) { visited[ni]=1; queue.push(ni); }
+      });
+    }
+    if (cells.length >= MIN_CELLS) blobs.push(cells);
+  }
+
+  // Tracer les bounding boxes détectées
+  let bestBlob = null, bestScore = 0;
+
+  blobs.forEach(cells => {
+    let minC=cols, maxC=0, minR=rows, maxR=0;
+    cells.forEach(i => {
+      const r=Math.floor(i/cols), c=i%cols;
+      minC=Math.min(minC,c); maxC=Math.max(maxC,c);
+      minR=Math.min(minR,r); maxR=Math.max(maxR,r);
+    });
+
+    const blobW = (maxC-minC+1)*CELL;
+    const blobH = (maxR-minR+1)*CELL;
+    const ratio = blobW / blobH;
+
+    // Filtre forme : quasi-carré (0.6 à 1.6) — panneau STOP = octogone
+    if (ratio < 0.55 || ratio > 1.7) return;
+
+    // Score = taille * compacité
+    const score = cells.length * (ratio > 0.8 && ratio < 1.25 ? 1.3 : 1.0);
+    if (score > bestScore) {
+      bestScore = score;
+      bestBlob = { x: minC*CELL, y: minR*CELL, w: blobW, h: blobH,
+                   conf: Math.min(0.98, 0.5 + cells.length * 0.04) };
+    }
+  });
+
+  if (bestBlob && bestBlob.conf > 0.52) {
+    const b = bestBlob;
+    // Dessiner bbox rouge STOP
+    drawBBox(ctx, b.x, b.y, b.w, b.h, '#ff2d55', '🛑 STOP', b.conf);
+
+    // Dessiner octogone stylisé au centre
+    const cx = b.x + b.w/2, cy = b.y + b.h/2;
+    const radius = Math.min(b.w, b.h) * 0.4;
+    ctx.strokeStyle = '#ff2d55';
+    ctx.lineWidth = 3;
+    ctx.shadowColor = '#ff2d55';
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const angle = (i * Math.PI / 4) - Math.PI/8;
+      const px = cx + radius * Math.cos(angle);
+      const py = cy + radius * Math.sin(angle);
+      i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Déclencher l'action STOP (avec cooldown)
+    const now = Date.now();
+    if (now - lastStopTime > STOP_COOLDOWN) {
+      lastStopTime = now;
+      onStopSignDetected(b.conf);
+    }
+
+    updateSignPanel('stop', b.conf);
+  } else {
+    // Aucun STOP détecté — nettoyer badge si nécessaire
+    if (!state.stopCountdown) clearSignPanel('stop');
+  }
+}
+
+function onStopSignDetected(conf) {
+  state.counts.stop++;
+  document.getElementById('cnt-stop').textContent = state.counts.stop;
+  log(`🛑 STOP détecté (conf: ${(conf*100).toFixed(0)}%) — Arrêt 2s`, 'danger');
+  triggerStop();
+}
+
+// ============================================================
+// DÉTECTION FEUX DE SIGNALISATION — Analyse pixel réelle
+// ============================================================
+// Algorithme :
+//  1. Chercher une zone verticale sombre (boîtier feu)
+//  2. Dans cette zone, détecter les cercles de couleur :
+//     - ROUGE  : hue 0-15° ou 345-360°, sat>50%, val>40%
+//     - ORANGE : hue 15-40°, sat>50%, val>40%
+//     - VERT   : hue 90-150°, sat>40%, val>35%
+//  3. La couleur dominante dans la moitié supérieure/centrale/basse
+//     détermine l'état du feu
+//  4. Ratio de pixels colorés / zone totale = confiance
+// ============================================================
+
+function rgbToHsv(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const d = max - min;
+  let h = 0, s = max === 0 ? 0 : d / max, v = max;
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h = ((h * 60) + 360) % 360;
+  }
+  return { h, s, v };
+}
+
+function classifyLightPixel(r, g, b) {
+  const { h, s, v } = rgbToHsv(r, g, b);
+  if (v < 0.25 || s < 0.3) return null; // trop sombre ou gris
+
+  if ((h <= 18 || h >= 342) && s > 0.5) return 'red';     // rouge
+  if (h > 18  && h <= 42   && s > 0.5) return 'orange';   // orange/jaune
+  if (h > 85  && h <= 155  && s > 0.4) return 'green';    // vert
+  return null;
+}
+
+function detectTrafficLight(ctx, imageData, W, H) {
+  const data = imageData.data;
+  const STEP = 3;  // échantillonnage tous les 3px (performance)
+
+  // Compter les pixels de chaque couleur dans la moitié supérieure
+  // (les feux sont généralement en haut de l'image)
+  const scanH = Math.floor(H * 0.65);
+
+  let counts = { red: 0, orange: 0, green: 0, total: 0 };
+  // Garder aussi la position des clusters
+  let redPts=[], orangePts=[], greenPts=[];
+
+  for (let y = 0; y < scanH; y += STEP) {
+    for (let x = 0; x < W; x += STEP) {
+      const idx = (y * W + x) * 4;
+      const col = classifyLightPixel(data[idx], data[idx+1], data[idx+2]);
+      counts.total++;
+      if (col) {
+        counts[col]++;
+        if      (col === 'red')    redPts.push({x, y});
+        else if (col === 'orange') orangePts.push({x, y});
+        else if (col === 'green')  greenPts.push({x, y});
+      }
+    }
+  }
+
+  // Seuil minimal de pixels colorés pour déclencher
+  const MIN_PIXELS = 18;
+
+  const hasRed    = redPts.length    >= MIN_PIXELS;
+  const hasOrange = orangePts.length >= MIN_PIXELS;
+  const hasGreen  = greenPts.length  >= MIN_PIXELS;
+
+  if (!hasRed && !hasOrange && !hasGreen) {
+    clearSignPanel('light');
+    return;
+  }
+
+  // Trouver le cluster dominant et sa bounding box
+  let dominantColor = null, dominantPts = [];
+  if (hasRed && redPts.length >= orangePts.length && redPts.length >= greenPts.length) {
+    dominantColor = 'red'; dominantPts = redPts;
+  } else if (hasOrange && orangePts.length >= greenPts.length) {
+    dominantColor = 'orange'; dominantPts = orangePts;
+  } else if (hasGreen) {
+    dominantColor = 'green'; dominantPts = greenPts;
+  }
+
+  if (!dominantColor) return;
+
+  // Bounding box du cluster dominant
+  let minX=W, maxX=0, minY=H, maxY=0;
+  // Prendre un sous-ensemble pour perf
+  const sample = dominantPts.slice(0, Math.min(dominantPts.length, 200));
+  sample.forEach(p => {
+    minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x);
+    minY=Math.min(minY,p.y); maxY=Math.max(maxY,p.y);
+  });
+
+  const bw = maxX - minX + 20;
+  const bh = maxY - minY + 20;
+  const bx = Math.max(0, minX - 10);
+  const by = Math.max(0, minY - 10);
+
+  // Filtre taille minimale (éviter faux positifs sur petites zones)
+  if (bw < 12 || bh < 12) return;
+
+  const conf = Math.min(0.97, 0.45 + dominantPts.length * 0.008);
+
+  const colorMap = {
+    red:    { hex: '#ff2d55', label: '🔴 FEU ROUGE',   action: 'ARRÊT OBLIGATOIRE',    badge: 'badge-red',         badgeEl: 'badge-red' },
+    orange: { hex: '#ff9500', label: '🟡 FEU ORANGE',  action: 'RALENTIR — PRÉPAREZ-VOUS', badge: 'badge-yellow',   badgeEl: 'badge-yield' },
+    green:  { hex: '#00ff88', label: '🟢 FEU VERT',    action: 'PASSAGE AUTORISÉ',     badge: 'badge-green-light', badgeEl: 'badge-green-light' }
+  };
+
+  const cm = colorMap[dominantColor];
+
+  // Dessiner bbox + cercle de couleur
+  drawBBox(ctx, bx, by, bw, bh, cm.hex, cm.label, conf);
+
+  // Cercle lumineux au centre de la zone
+  const cx = bx + bw/2, cy = by + bh/2;
+  const radius = Math.min(bw, bh) * 0.35;
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI*2);
+  ctx.strokeStyle = cm.hex;
+  ctx.lineWidth = 3;
+  ctx.shadowColor = cm.hex;
+  ctx.shadowBlur = 15;
+  ctx.stroke();
+  ctx.fillStyle = cm.hex + '30';
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Notifier si état change
+  const now = Date.now();
+  if (dominantColor !== lastLightState || now - lastLightTime > LIGHT_COOLDOWN * 3) {
+    lastLightState = dominantColor;
+    lastLightTime  = now;
+    onTrafficLightDetected(dominantColor, conf, cm);
+  }
+
+  updateSignPanel('light', conf, cm);
+
+  // Mettre à jour badges feux
+  document.querySelectorAll('.det-badge[id^="badge-"]').forEach(b => {
+    b.classList.remove('active','warning','danger');
+  });
+  const badgeEl = document.getElementById(cm.badgeEl);
+  if (badgeEl) {
+    badgeEl.classList.add(dominantColor === 'red' ? 'danger' : dominantColor === 'orange' ? 'warning' : 'active');
+  }
+}
+
+function onTrafficLightDetected(color, conf, cm) {
+  state.counts.lights++;
+  document.getElementById('cnt-lights').textContent = state.counts.lights;
+  log(`${cm.label} détecté (conf: ${(conf*100).toFixed(0)}%) — ${cm.action}`, color === 'red' ? 'danger' : color === 'orange' ? 'warning' : 'success');
+
+  // Action automatique en mode autonome
+  if (state.auto) {
+    if (color === 'red') {
+      motorCmd('S');
+      sendBLE('S');
+      log('🤖 AUTO: Arrêt — feu rouge', 'danger');
+    } else if (color === 'orange') {
+      // Réduire vitesse à 50%
+      const slowSpeed = Math.floor(state.motor.speed * 0.5);
+      sendBLE(`V${slowSpeed}`);
+      log('🤖 AUTO: Ralentissement — feu orange', 'warning');
+    } else if (color === 'green') {
+      sendBLE(`V${state.motor.speed}`);
+      if (state.motor.direction === 'S') {
+        motorCmd('F');
+        log('🤖 AUTO: Reprise — feu vert', 'success');
+      }
+    }
+  }
+}
+
+// ============================================================
+// DÉTECTION OBSTACLE PAR COULEUR (zone centrale image)
+// ============================================================
+// Cherche une masse sombre ou très colorée dans le couloir central
+// qui bloquerait la trajectoire (sol exclu = moitié basse ignorée)
+// ============================================================
+function detectColorObstacle(ctx, imageData, W, H) {
+  const data = imageData.data;
+  // Zone d'analyse : couloir central 30% de large, quart supérieur-central
+  const x0 = Math.floor(W * 0.35), x1 = Math.floor(W * 0.65);
+  const y0 = Math.floor(H * 0.25), y1 = Math.floor(H * 0.60);
+  const STEP = 4;
+
+  let darkCount = 0, total = 0;
+
+  for (let y = y0; y < y1; y += STEP) {
+    for (let x = x0; x < x1; x += STEP) {
+      const idx = (y * W + x) * 4;
+      const r=data[idx], g=data[idx+1], b=data[idx+2];
+      const brightness = (r + g + b) / 3;
+      if (brightness < 60) darkCount++;
+      total++;
+    }
+  }
+
+  const ratio = darkCount / total;
+
+  if (ratio > 0.30) {
+    // Obstacle probable dans le couloir central
+    const conf = Math.min(0.95, 0.4 + ratio * 1.5);
+    drawBBox(ctx, x0, y0, x1-x0, y1-y0, '#ff6b35', '⬛ OBSTACLE', conf);
+
+    state.counts.obstacles++;
+    document.getElementById('cnt-obstacles').textContent = state.counts.obstacles;
+    updateDetBadge('db-obs', state.counts.obstacles, 'danger');
+
+    // Distance estimée depuis la taille de la zone sombre
+    const estDist = Math.max(10, Math.round(80 * (1 - ratio)));
+    simulateDistance(estDist);
+
+    if (state.auto && estDist < state.motor.safeDist) {
+      motorCmd('S');
+      sendBLE('S');
+      log(`⛔ Obstacle central détecté (~${estDist}cm) — Arrêt`, 'danger');
+    }
+  }
+}
+
+// ============================================================
+// HELPERS PANNEAU INFO
+// ============================================================
+function updateSignPanel(type, conf, cm) {
+  const display = document.getElementById('signDisplay');
+  const badge   = document.getElementById('signBadge');
+
+  if (type === 'stop') {
+    display.innerHTML = `
+      <div class="sign-icon-big">🛑</div>
+      <div class="sign-info">
+        <div class="sign-name">PANNEAU STOP</div>
+        <div class="sign-action">Rouge octogonal détecté</div>
+      </div>
+      <div class="sign-conf" style="color:var(--danger)">${(conf*100).toFixed(0)}%</div>`;
+    badge.textContent = 'STOP!';
+    badge.style.color = 'var(--danger)';
+    document.getElementById('badge-stop').classList.add('danger');
+  } else if (type === 'light' && cm) {
+    display.innerHTML = `
+      <div class="sign-icon-big">${cm.label.split(' ')[0]}</div>
+      <div class="sign-info">
+        <div class="sign-name">${cm.label.substring(3)}</div>
+        <div class="sign-action">${cm.action}</div>
+      </div>
+      <div class="sign-conf" style="color:${cm.hex}">${(conf*100).toFixed(0)}%</div>`;
+    badge.textContent = cm.label.substring(3, 9).trim();
+    badge.style.color = cm.hex;
+  }
+}
+
+function clearSignPanel(type) {
+  const now = Date.now();
+  if (type === 'stop' && now - lastStopTime > STOP_COOLDOWN) {
+    document.getElementById('badge-stop').classList.remove('danger');
+  }
+  if (type === 'light' && now - lastLightTime > LIGHT_COOLDOWN * 4) {
+    lastLightState = null;
+    document.getElementById('signBadge').textContent = 'ACTIF';
+    document.getElementById('signBadge').style.color = '';
+  }
+}
+
+function drawBBox(ctx, x, y, w, h, color, label, conf) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 6;
+  ctx.strokeRect(x, y, w, h);
+  ctx.shadowBlur = 0;
+
+  // Corner marks
+  const cs = 10;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  [[x,y],[x+w,y],[x,y+h],[x+w,y+h]].forEach(([cx,cy]) => {
+    const dx = cx === x ? 1 : -1;
+    const dy = cy === y ? 1 : -1;
+    ctx.moveTo(cx, cy + dy*cs);
+    ctx.lineTo(cx, cy);
+    ctx.lineTo(cx + dx*cs, cy);
+  });
+  ctx.stroke();
+
+  // Label
+  ctx.fillStyle = color + 'CC';
+  ctx.fillRect(x, y - 22, label.length * 7 + 60, 20);
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 11px Share Tech Mono';
+  ctx.fillText(`${label} ${(conf*100).toFixed(0)}%`, x + 4, y - 7);
+}
+
+function drawGuide(ctx, W, H) {
+  // Center line
+  ctx.strokeStyle = 'rgba(0,212,255,0.2)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([5, 10]);
+  ctx.beginPath();
+  ctx.moveTo(W/2, H*0.3);
+  ctx.lineTo(W/2, H);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Horizon line
+  ctx.strokeStyle = 'rgba(0,212,255,0.1)';
+  ctx.beginPath();
+  ctx.moveTo(0, H*0.45);
+  ctx.lineTo(W, H*0.45);
+  ctx.stroke();
+}
+
+function applyEdgeFilter(ctx, imageData, W, H) {
+  const data = imageData.data;
+  const out = ctx.createImageData(W, H);
+  for (let y = 1; y < H-1; y++) {
+    for (let x = 1; x < W-1; x++) {
+      const idx = (y*W+x)*4;
+      const gx = -data[((y-1)*W+(x-1))*4] + data[((y-1)*W+(x+1))*4]
+                 -2*data[(y*W+(x-1))*4] + 2*data[(y*W+(x+1))*4]
+                 -data[((y+1)*W+(x-1))*4] + data[((y+1)*W+(x+1))*4];
+      const gy = -data[((y-1)*W+(x-1))*4] - 2*data[((y-1)*W+x)*4] - data[((y-1)*W+(x+1))*4]
+                 +data[((y+1)*W+(x-1))*4] + 2*data[((y+1)*W+x)*4] + data[((y+1)*W+(x+1))*4];
+      const mag = Math.min(255, Math.sqrt(gx*gx + gy*gy));
+      out.data[idx] = 0;
+      out.data[idx+1] = mag;
+      out.data[idx+2] = mag * 0.6;
+      out.data[idx+3] = 255;
+    }
+  }
+  ctx.putImageData(out, 0, 0);
+}
+
+function applyColorFilter(ctx, imageData, W, H) {
+  const data = imageData.data;
+  const out = ctx.createImageData(W, H);
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i+1], b = data[i+2];
+    // Saturate
+    const avg = (r+g+b)/3;
+    out.data[i]   = Math.min(255, avg + (r-avg)*2.5);
+    out.data[i+1] = Math.min(255, avg + (g-avg)*2.5);
+    out.data[i+2] = Math.min(255, avg + (b-avg)*2.5);
+    out.data[i+3] = 255;
+  }
+  ctx.putImageData(out, 0, 0);
+}
+
+// ============================================================
+// MOTOR CONTROL
+// ============================================================
+function motorCmd(cmd) {
+  state.motor.direction = cmd;
+  sendBLE(cmd);
+  updateMotorUI(cmd);
+}
+
+function updateMotorUI(cmd) {
+  const labels = { F:'AVANT', B:'ARRIÈRE', L:'GAUCHE', R:'DROITE', S:'ARRÊT' };
+  document.getElementById('motorState').textContent = labels[cmd] || cmd;
+  document.getElementById('dirDisplay').textContent = labels[cmd] || cmd;
+
+  const speed = parseInt(document.getElementById('speedSlider').value);
+  const pct = Math.round(speed/255*100);
+
+  let lPct = 0, rPct = 0;
+  if (cmd === 'F') { lPct = pct; rPct = pct; }
+  else if (cmd === 'B') { lPct = pct; rPct = pct; }
+  else if (cmd === 'L') { lPct = 0; rPct = pct; }
+  else if (cmd === 'R') { lPct = pct; rPct = 0; }
+
+  document.getElementById('motorL').style.width = lPct + '%';
+  document.getElementById('motorR').style.width = rPct + '%';
+  document.getElementById('motorLVal').textContent = lPct + '%';
+  document.getElementById('motorRVal').textContent = rPct + '%';
+  document.getElementById('actualSpeed').innerHTML = `${pct}<span class="stat-unit">%</span>`;
+
+  if (cmd !== 'S') log(`🚗 Moteur: ${labels[cmd]} à ${pct}%`, 'info');
+}
+
+function updateSpeed(val) {
+  document.getElementById('speedVal').textContent = `${val} / 255`;
+  const cmd = `V${val}`;
+  sendBLE(cmd);
+}
+
+function updateSafeDist(val) {
+  state.motor.safeDist = parseInt(val);
+  document.getElementById('safeDistVal').textContent = `${val} cm`;
+  log(`⚙ Distance sécurité: ${val}cm`, 'info');
+}
+
+function emergencyStop() {
+  motorCmd('S');
+  sendBLE('E');
+  log('🚨 ARRÊT D\'URGENCE ACTIVÉ!', 'danger');
+
+  // Flash effect
+  document.body.style.boxShadow = 'inset 0 0 80px rgba(255,45,85,0.3)';
+  setTimeout(() => document.body.style.boxShadow = '', 300);
+}
+
+// ============================================================
+// AUTO MODE
+// ============================================================
+function toggleAutoMode() {
+  state.auto = !state.auto;
+  const sw = document.getElementById('autoSwitch');
+  const toggle = document.getElementById('autoToggle');
+  const label = document.getElementById('autoLabel');
+  const sub = document.getElementById('autoSubLabel');
+  const modeBadge = document.getElementById('modeBadge');
+
+  if (state.auto) {
+    sw.classList.add('on');
+    toggle.classList.add('active');
+    label.textContent = '🤖 MODE AUTONOME';
+    label.style.color = 'var(--accent2)';
+    sub.textContent = 'Suivi de ligne actif';
+    modeBadge.textContent = 'MODE: AUTONOME';
+    sendBLE('A1');
+    log('🤖 Mode autonome ACTIVÉ', 'success');
+  } else {
+    sw.classList.remove('on');
+    toggle.classList.remove('active');
+    label.textContent = '⚙ MODE MANUEL';
+    label.style.color = 'var(--text-dim)';
+    sub.textContent = 'Contrôle direct actif';
+    modeBadge.textContent = 'MODE: MANUEL';
+    sendBLE('A0');
+    motorCmd('S');
+    log('🕹 Mode manuel ACTIVÉ', 'warning');
+  }
+}
+
+// ============================================================
+// STOP SIGN
+// ============================================================
+function triggerStop() {
+  if (state.stopCountdown) return;
+  log('🛑 Panneau STOP détecté! Arrêt 2 secondes', 'danger');
+
+  const prevCmd = state.motor.direction;
+  motorCmd('S');
+  sendBLE('S');
+
+  document.getElementById('badge-stop').classList.add('danger');
+  document.getElementById('signDisplay').innerHTML = `
+    <div class="sign-icon-big">🛑</div>
+    <div class="sign-info">
+      <div class="sign-name">PANNEAU STOP</div>
+      <div class="sign-action">Arrêt obligatoire 2 secondes</div>
+    </div>
+    <div class="sign-conf" style="color:var(--danger)">98%</div>
+  `;
+  document.getElementById('signBadge').textContent = 'STOP!';
+
+  const overlay = document.getElementById('stopCountdown');
+  const numEl = document.getElementById('countdownNum');
+  overlay.style.display = 'flex';
+  numEl.textContent = '2';
+
+  state.stopCountdown = setTimeout(() => {
+    numEl.textContent = '1';
+    state.stopCountdown = setTimeout(() => {
+      overlay.style.display = 'none';
+      document.getElementById('badge-stop').classList.remove('danger');
+      state.stopCountdown = null;
+      if (state.auto) {
+        sendBLE('F');
+        updateMotorUI('F');
+        log('▶ Reprise après STOP', 'success');
+      }
+      document.getElementById('signDisplay').innerHTML = `
+        <div class="sign-icon-big">🔍</div>
+        <div class="sign-info">
+          <div class="sign-name">EN SURVEILLANCE</div>
+          <div class="sign-action">Détection active...</div>
+        </div>
+        <div class="sign-conf" style="color:var(--text-dim)">—</div>
+      `;
+      document.getElementById('signBadge').textContent = 'CLEAR';
+    }, 1000);
+  }, 1000);
+
+  state.counts.stop++;
+  document.getElementById('cnt-stop').textContent = state.counts.stop;
+}
+
+// ============================================================
+// DISTANCE SIMULATION
+// ============================================================
+function simulateDistance(dist) {
+  state.distance = dist;
+  const card = document.getElementById('distCard');
+  const fill = document.getElementById('distFill');
+
+  card.querySelector('.stat-value').innerHTML = `${dist.toFixed(0)}<span class="stat-unit">cm</span>`;
+  fill.style.width = Math.min(100, dist) + '%';
+
+  const pct = dist / 100;
+  fill.style.background = pct < 0.3
+    ? 'var(--danger)'
+    : pct < 0.5
+    ? 'var(--accent4)'
+    : 'var(--accent2)';
+
+  if (dist < state.motor.safeDist) {
+    card.classList.add('danger');
+    if (state.auto) {
+      motorCmd('S');
+      log(`⛔ Obstacle à ${dist.toFixed(0)}cm! Arrêt (seuil: ${state.motor.safeDist}cm)`, 'danger');
+    }
+    state.counts.obstacles++;
+    document.getElementById('cnt-obstacles').textContent = state.counts.obstacles;
+    updateDetBadge('db-obs', state.counts.obstacles, 'danger');
+  } else if (dist < state.motor.safeDist * 2) {
+    card.classList.add('warning');
+    card.classList.remove('danger');
+  } else {
+    card.classList.remove('danger', 'warning');
+  }
+}
+
+// ============================================================
+// UI HELPERS
+// ============================================================
+function selectColor(el, color, hex, label) {
+  document.querySelectorAll('.color-btn').forEach(b => {
+    b.classList.remove('selected');
+    b.style.borderColor = 'transparent';
+    b.style.color = 'var(--text-dim)';
+  });
+  el.classList.add('selected');
+  el.style.borderColor = hex;
+  el.style.color = hex;
+  state.selectedColor = color;
+  document.getElementById('colorBadge').textContent = label;
+  document.getElementById('colorBadge').style.color = hex;
+  log(`🎨 Couleur sélectionnée: ${label}`, 'info');
+}
+
+function toggleDetect(el, key) {
+  state.detections[key] = !state.detections[key];
+  const cb = el.querySelector('.detect-checkbox');
+  if (state.detections[key]) {
+    cb.classList.add('on');
+    cb.textContent = '✓';
+  } else {
+    cb.classList.remove('on');
+    cb.textContent = '';
+  }
+  const on = Object.values(state.detections).filter(Boolean).length;
+  document.getElementById('detCount').textContent = `${on} modules`;
+  log(`${state.detections[key]?'✅':'⬜'} Détection ${key}: ${state.detections[key]?'ON':'OFF'}`, 'info');
+}
+
+function updateDetBadge(id, count, cls) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.querySelector('span').textContent = ` ${count}`;
+  el.className = `det-badge ${cls}`;
+}
+
+function setViewMode(el, mode) {
+  document.querySelectorAll('.mode-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  state.viewMode = mode;
+  log(`👁 Mode vision: ${mode.toUpperCase()}`, 'info');
+}
+
+// ============================================================
+// KEYBOARD SHORTCUTS
+// ============================================================
+const keyMap = { ArrowUp:'F', ArrowDown:'B', ArrowLeft:'L', ArrowRight:'R', ' ':'S' };
+const activeKeys = new Set();
+
+document.addEventListener('keydown', e => {
+  const cmd = keyMap[e.key];
+  if (!cmd || activeKeys.has(e.key)) return;
+  activeKeys.add(e.key);
+  motorCmd(cmd);
+  const btn = document.getElementById({F:'btn-fwd',B:'btn-bwd',L:'btn-left',R:'btn-right',S:'btn-stop'}[cmd]);
+  if (btn) btn.classList.add('pressed');
+  e.preventDefault();
+});
+
+document.addEventListener('keyup', e => {
+  const cmd = keyMap[e.key];
+  if (!cmd) return;
+  activeKeys.delete(e.key);
+  if (!activeKeys.has('ArrowUp') && !activeKeys.has('ArrowDown') &&
+      !activeKeys.has('ArrowLeft') && !activeKeys.has('ArrowRight')) {
+    motorCmd('S');
+  }
+  document.querySelectorAll('.dpad-btn').forEach(b => b.classList.remove('pressed'));
+});
+
+// ============================================================
+// INIT
+// ============================================================
+log('🚀 Système ESP32U initialisé', 'success');
+log('⌨ Utilisez les flèches clavier pour piloter', 'info');
+log('📡 En attente connexion BLE...', 'info');
+log('📷 Cliquez sur CAMÉRA pour sélectionner la source vidéo', 'info');
+log('👁 Vision: détection STOP + feux + obstacles par analyse pixel', 'info');
+
+// Color button initial style
+document.querySelector('.color-btn.selected').style.borderColor = '#ffffff';
+document.querySelector('.color-btn.selected').style.color = '#ffffff';
+
+// Listen for device changes (plug/unplug camera)
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+  navigator.mediaDevices.addEventListener('devicechange', () => {
+    log('🔌 Changement de périphérique détecté', 'info');
+    if (camDropdownOpen) enumerateCameras();
+  });
+}
+
+// Simulate periodic telemetry
+setInterval(() => {
+  if (state.camera.active) {
+    const dist = 15 + Math.random() * 85;
+    simulateDistance(dist);
+  }
+}, 2000);
+</script>
+</body>
+</html>
